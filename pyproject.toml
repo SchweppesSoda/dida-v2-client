@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dida-v2-client"
+version = "0.1.0"
+description = "Small Dida365-first private v2 client with CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{name = "Junfang + Hermes"}]
+dependencies = []
+
+[project.optional-dependencies]
+headless = ["selenium>=4.20", "webdriver-manager>=4.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+dida-v2 = "dida_v2_client.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dida_v2_client"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/dida_v2_client", "tests", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
