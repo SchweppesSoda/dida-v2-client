@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +30,19 @@ def _credential_pair(*, username_env: str, password_env: str) -> tuple[str, str]
     return username, password
 
 
+def _device_id() -> str:
+    configured = os.getenv("DIDA_DEVICE_ID") or os.getenv("TICKTICK_DEVICE_ID")
+    if configured:
+        if not re.fullmatch(r"[0-9a-fA-F]{24}", configured):
+            raise DidaAuthError("DIDA_DEVICE_ID/TICKTICK_DEVICE_ID must be a 24-character hex string.")
+        return configured.lower()
+    # Dida's sign-on endpoint rejects arbitrary/non-web-like device IDs with a
+    # misleading username_password_not_match error. Keep the default stable and
+    # v2-client specific, in the same 24-hex shape used by the web app. Users can
+    # override it with DIDA_DEVICE_ID/TICKTICK_DEVICE_ID if needed.
+    return "6790a0b0c1d2e3f4a5b6c7d8"
+
+
 def _device_header() -> str:
     return json.dumps(
         {
@@ -37,7 +51,7 @@ def _device_header() -> str:
             "device": "dida-v2-client",
             "name": "",
             "version": 8006,
-            "id": "dida-v2-client-local",
+            "id": _device_id(),
             "channel": "website",
         },
         separators=(",", ":"),
@@ -88,7 +102,9 @@ def direct_signon_login(
         try:
             data = json.loads(body) if body else {}
             if isinstance(data, dict):
-                detail = str(data.get("errorMessage") or data.get("message") or data.get("errorCode") or "")
+                code = str(data.get("errorCode") or "")
+                message = str(data.get("errorMessage") or data.get("message") or "")
+                detail = " ".join(part for part in [code, message] if part)
         except Exception:
             detail = body[:120]
         detail = detail.replace(username, "[USERNAME]").replace(password, "[PASSWORD]")

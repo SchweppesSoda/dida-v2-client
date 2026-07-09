@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -58,7 +59,18 @@ def test_direct_signon_login_posts_to_dida_v2(monkeypatch):
     assert seen["timeout"] == 7
     assert seen["body"] == {"username": "user@example.com", "password": "local-password"}
     assert seen["headers"]["Origin"] == "https://dida365.com"
-    assert "X-device" in seen["headers"]
+    x_device = json.loads(seen["headers"]["X-device"])
+    assert x_device["id"] == "6790a0b0c1d2e3f4a5b6c7d8"
+    assert re.fullmatch(r"[0-9a-f]{24}", x_device["id"])
+
+
+def test_direct_signon_rejects_invalid_device_id(monkeypatch):
+    monkeypatch.setenv("DIDA_EMAIL", "user@example.com")
+    monkeypatch.setenv("DIDA_PASSWORD", "local-password")
+    monkeypatch.setenv("DIDA_DEVICE_ID", "not-a-hex-device-id")
+
+    with pytest.raises(DidaAuthError, match="24-character hex"):
+        direct_signon_login()
 
 
 def test_direct_signon_requires_local_credentials(monkeypatch):

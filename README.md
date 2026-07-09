@@ -8,7 +8,7 @@ Small, conservative Dida365-first private v2 client.
 - TickTick international compatibility is a profile switch; it is mostly the same API shape with different domains.
 - We are moving toward **v2-first** coverage, while keeping write operations safe by default.
 - Prefer official v1 / `dida` CLI only as a fallback while the v2 client is still gaining typed wrappers and live verification.
-- Authentication defaults to direct local web sign-on (`DIDA_EMAIL`/`DIDA_PASSWORD`) and falls back to Selenium form automation, then raw local `t` session token env vars.
+- Authentication defaults to direct local web sign-on (`DIDA_EMAIL`/`DIDA_PASSWORD`) and falls back to Selenium form automation, then raw local `t` session token env vars. Direct sign-on uses a stable live-verified 24-hex `X-Device` id by default; override with `DIDA_DEVICE_ID` only if needed.
 - CLI write operations default to dry-run; pass `--apply` to write.
 
 ## Endpoints
@@ -105,7 +105,7 @@ Fallback token mode:
 DIDA_SESSION_TOKEN='<local-cookie-t-value>' uv run dida-v2 --no-headless tags list
 ```
 
-Do not paste session tokens, passwords, or cookies into chat. Prefer direct local sign-on via `DIDA_EMAIL`/`DIDA_PASSWORD`; Selenium form automation is only a fallback because Dida365 login pages can change selectors or show captcha/Turnstile.
+Do not paste session tokens, passwords, or cookies into chat. Prefer direct local sign-on via `DIDA_EMAIL`/`DIDA_PASSWORD`; Selenium form automation is only a fallback because Dida365 login pages can change selectors or show captcha/Turnstile. If Dida returns misleading `username_password_not_match` despite correct credentials, check/override `DIDA_DEVICE_ID` with a 24-character hex string.
 
 ## Current scope
 
