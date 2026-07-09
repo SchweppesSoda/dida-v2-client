@@ -8,7 +8,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 - All literal v2 endpoints found in those two community codebases are now represented in this client. The only textual mismatch is `ticktick-api-v2`'s `pomodoros/timeline{timestamp_query_param}`, implemented here as `/pomodoros/timeline` plus query params.
 - GitHub `KpihX/tick-mcp` adds a higher-level layer on top of endpoints: query/search views, verified actions, and live tests. This repository now implements the first Dida365-first subset: workspace map, task query, agenda query, priority dashboard, and verified move/parent/folder writes.
 - Public Dida marketing/webapp bundles do **not** expose the logged-in task app v2 surface without a session. The sign-in bundle does confirm `POST /api/v2/user/signon?wc=true&remember=true`.
-- Live auth probe on 2026-07-09: direct Dida v2 sign-on with temporary local credentials returned a session token, and read-only `/user/status`, `/batch/check/0`, and `/habits` requests succeeded. Selenium headless could load the login page and submit the form, but no `t` cookie was issued in headless form mode; captcha/Turnstile markers were present.
+- Live auth probe on 2026-07-09: direct Dida v2 sign-on with temporary local credentials returned a session token, and read-only `/user/status`, `/batch/check/0`, and `/habits` requests succeeded. Selenium headless could load the login page and submit the form, but no `t` cookie was issued in headless form mode; captcha/Turnstile markers were present. The package now wraps direct sign-on and uses Selenium only as fallback.
 - Unauthenticated Dida v2 probe confirms auth boundary:
   - `GET /user/status` → HTTP 401 `user_not_sign_on`
   - `GET /batch/check/0` → HTTP 500 `access_forbidden`
@@ -69,7 +69,8 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 1. **Authentication**
    - v2 requires the logged-in web session cookie `t`.
    - Open API bearer tokens do not authorize v2 endpoints.
-   - Direct `POST /user/signon?wc=true&remember=true` was live-verified for read-only v2 access; form-based Selenium login may still be gated by captcha/Turnstile.
+   - Direct `POST /user/signon?wc=true&remember=true` is now wrapped for local env credentials and should be preferred over Selenium form automation.
+   - Selenium fallback includes Dida365 `#emailOrPhone`, but form login can still be gated by captcha/Turnstile and may not issue `t`.
 
 2. **Task creation and subtasks**
    - `parentId` in `batch/task` create payload is reported by `tick-mcp` to be silently ignored.
@@ -95,7 +96,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 
 | Area | Evidence | Status |
 | --- | --- | --- |
-| Direct web sign-on | `POST /api/v2/user/signon?wc=true&remember=true` live-verified 2026-07-09 for read-only v2 access | Not wrapped yet; should be implemented via local env/keychain and never print tokens/passwords |
+| Direct web sign-on | `POST /api/v2/user/signon?wc=true&remember=true` live-verified 2026-07-09 for read-only v2 access | Wrapped in `direct_signon_login()` and used by default by `resolve_session_token()` when local env credentials are present; next: cache/keychain integration |
 | Comments | v1 CLI/Open API supports comments; no confirmed v2 endpoint in inspected sources | Keep v1 for now |
 | Attachments | `batch/task` payload supports `addAttachments`/`updateAttachments`/`deleteAttachments`; no high-level typed wrapper yet | Generic payload supported in client, CLI not yet exposed |
 | Calendar integrations | Public web bundle exposes site/calendar paths, not confirmed task-app v2 endpoints | Not wrapped |

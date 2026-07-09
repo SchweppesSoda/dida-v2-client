@@ -8,7 +8,7 @@ Small, conservative Dida365-first private v2 client.
 - TickTick international compatibility is a profile switch; it is mostly the same API shape with different domains.
 - We are moving toward **v2-first** coverage, while keeping write operations safe by default.
 - Prefer official v1 / `dida` CLI only as a fallback while the v2 client is still gaining typed wrappers and live verification.
-- Authentication defaults to local headless-browser login. Raw `t` session token env vars are a local fallback only.
+- Authentication defaults to direct local web sign-on (`DIDA_EMAIL`/`DIDA_PASSWORD`) and falls back to Selenium form automation, then raw local `t` session token env vars.
 - CLI write operations default to dry-run; pass `--apply` to write.
 
 ## Endpoints
@@ -30,8 +30,8 @@ v2:  https://api.ticktick.com/api/v2
 ## CLI examples
 
 ```bash
-# session / sync
-uv run dida-v2 status
+# session / sync; credentials stay in local env/secret store, not chat
+DIDA_EMAIL='<local-email>' DIDA_PASSWORD='<local-password>' uv run dida-v2 status
 
 # tags
 uv run dida-v2 --no-headless tags list
@@ -105,7 +105,7 @@ Fallback token mode:
 DIDA_SESSION_TOKEN='<local-cookie-t-value>' uv run dida-v2 --no-headless tags list
 ```
 
-Do not paste session tokens into chat. Prefer local headless login once implemented/validated for the active Dida login page.
+Do not paste session tokens, passwords, or cookies into chat. Prefer direct local sign-on via `DIDA_EMAIL`/`DIDA_PASSWORD`; Selenium form automation is only a fallback because Dida365 login pages can change selectors or show captcha/Turnstile.
 
 ## Current scope
 
@@ -129,7 +129,7 @@ See `docs/v2-capability-matrix.md` for migration status and remaining v2-first w
 
 ## Next likely additions
 
-- robust Dida365 headless login selector flow and local cookie cache
+- local session cache/keychain integration for direct sign-on tokens
 - live-backed verification harness using a disposable project/list
 - cascade-safe move helpers for parent tasks and their children
 - live sandbox tests using a disposable project/list
