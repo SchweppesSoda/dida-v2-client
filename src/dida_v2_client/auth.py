@@ -9,15 +9,20 @@ import urllib.request
 from typing import Callable
 
 from .config import DidaConfig
+from .transport import DidaV2Error
 
 HeadlessLogin = Callable[..., str]
+
+
+class DidaAuthError(DidaV2Error):
+    """Raised when no usable v2 session token can be resolved."""
 
 
 def _credential_pair(*, username_env: str, password_env: str) -> tuple[str, str]:
     username = os.getenv(username_env) or os.getenv("TICKTICK_EMAIL")
     password = os.getenv(password_env) or os.getenv("TICKTICK_PASSWORD")
     if not username or not password:
-        raise RuntimeError(
+        raise DidaAuthError(
             f"Automated login needs local env credentials ({username_env}/{password_env}); "
             "fallback DIDA_SESSION_TOKEN is supported for private local use."
         )
@@ -37,6 +42,11 @@ def _device_header() -> str:
         },
         separators=(",", ":"),
     )
+
+
+def _safe_error(exc: Exception) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return text.replace("\n", " ")[:300]
 
 
 def direct_signon_login(
@@ -82,15 +92,17 @@ def direct_signon_login(
         except Exception:
             detail = body[:120]
         detail = detail.replace(username, "[USERNAME]").replace(password, "[PASSWORD]")
-        raise RuntimeError(f"Direct sign-on failed: HTTP {exc.code} {detail}".rstrip()) from exc
+        raise DidaAuthError(f"Direct sign-on failed: HTTP {exc.code} {detail}".rstrip()) from exc
+    except urllib.error.URLError as exc:
+        raise DidaAuthError(f"Direct sign-on failed: {exc.reason}") from exc
 
     try:
         data = json.loads(raw) if raw else {}
     except json.JSONDecodeError as exc:
-        raise RuntimeError("Direct sign-on returned non-JSON response.") from exc
+        raise DidaAuthError("Direct sign-on returned non-JSON response.") from exc
     token = data.get("token") if isinstance(data, dict) else None
     if not token:
-        raise RuntimeError("Direct sign-on succeeded but did not return a session token.")
+        raise DidaAuthError("Direct sign-on succeeded but did not return a session token.")
     return str(token)
 
 
@@ -115,7 +127,7 @@ def selenium_headless_login(
         from selenium.webdriver.support import expected_conditions as EC  # type: ignore
         from selenium.webdriver.support.ui import WebDriverWait  # type: ignore
     except Exception as exc:  # pragma: no cover - optional dependency path
-        raise RuntimeError("Install dida-v2-client[headless] to use Selenium headless login.") from exc
+        raise DidaAuthError("Install dida-v2-client[headless] to use Selenium headless login.") from exc
 
     options = Options()
     options.add_argument("--headless=new")
@@ -151,7 +163,7 @@ def selenium_headless_login(
             time.sleep(1)
     finally:
         driver.quit()
-    raise RuntimeError("Selenium login finished but did not find session cookie `t`.")
+    raise DidaAuthError("Selenium login finished but did not find session cookie `t`.")
 
 
 def resolve_session_token(*, profile: str = "cn", headless: bool = True, headless_login: HeadlessLogin | None = None) -> str | None:
@@ -162,17 +174,25 @@ def resolve_session_token(*, profile: str = "cn", headless: bool = True, headles
     2. direct Dida/TickTick web sign-on using local env credentials;
     3. Selenium headless form fallback;
     4. raw local session-token env fallback.
+
+    If login strategies were attempted but no raw session-token env fallback exists,
+    raise ``DidaAuthError`` with the strategy failures instead of masking them as a
+    generic "missing token" error.
     """
+    errors: list[str] = []
     if headless:
         if headless_login is not None:
-            strategies: list[HeadlessLogin] = [headless_login]
+            strategies: list[tuple[str, HeadlessLogin]] = [("injected headless_login", headless_login)]
         else:
-            strategies = [direct_signon_login, selenium_headless_login]
-        for login in strategies:
+            strategies = [("direct sign-on", direct_signon_login), ("selenium fallback", selenium_headless_login)]
+        for name, login in strategies:
             try:
                 return login(profile=profile)
-            except Exception:
-                # Fallback exists for local/private use; callers can run the login
-                # strategy directly if they need the detailed auth error.
-                pass
-    return os.getenv("DIDA_SESSION_TOKEN") or os.getenv("TICKTICK_SESSION_TOKEN")
+            except Exception as exc:
+                errors.append(f"{name}: {_safe_error(exc)}")
+    token = os.getenv("DIDA_SESSION_TOKEN") or os.getenv("TICKTICK_SESSION_TOKEN")
+    if token:
+        return token
+    if errors:
+        raise DidaAuthError("Could not resolve v2 session token. " + "; ".join(errors))
+    return None

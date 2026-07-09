@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from dida_v2_client.auth import direct_signon_login, resolve_session_token
+from dida_v2_client.auth import DidaAuthError, direct_signon_login, resolve_session_token
 
 
 class FakeResponse:
@@ -67,7 +67,7 @@ def test_direct_signon_requires_local_credentials(monkeypatch):
     monkeypatch.delenv("TICKTICK_EMAIL", raising=False)
     monkeypatch.delenv("TICKTICK_PASSWORD", raising=False)
 
-    with pytest.raises(RuntimeError, match="local env credentials"):
+    with pytest.raises(DidaAuthError, match="local env credentials"):
         direct_signon_login()
 
 
@@ -84,3 +84,24 @@ def test_resolve_session_uses_direct_signon_before_env_fallback(monkeypatch):
     monkeypatch.setattr("dida_v2_client.auth.selenium_headless_login", fail_selenium)
 
     assert resolve_session_token() == "DIRECT_TOKEN"
+
+
+def test_resolve_session_reports_login_failures_when_no_token_fallback(monkeypatch):
+    monkeypatch.delenv("DIDA_SESSION_TOKEN", raising=False)
+    monkeypatch.delenv("TICKTICK_SESSION_TOKEN", raising=False)
+
+    def fail_direct(**kwargs):
+        raise DidaAuthError("direct boom")
+
+    def fail_selenium(**kwargs):
+        raise DidaAuthError("selenium boom")
+
+    monkeypatch.setattr("dida_v2_client.auth.direct_signon_login", fail_direct)
+    monkeypatch.setattr("dida_v2_client.auth.selenium_headless_login", fail_selenium)
+
+    with pytest.raises(DidaAuthError) as excinfo:
+        resolve_session_token()
+    message = str(excinfo.value)
+    assert "Could not resolve v2 session token" in message
+    assert "direct sign-on: direct boom" in message
+    assert "selenium fallback: selenium boom" in message
