@@ -178,15 +178,24 @@ def direct_signon_login(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
+            raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        raise DidaAuthError(f"Direct sign-on failed: HTTP {exc.code}") from None
+        status = exc.code
+        try:
+            exc.close()
+        except Exception:
+            pass
+        raise DidaAuthError(f"Direct sign-on failed: HTTP {status}") from None
     except (urllib.error.URLError, OSError):
         raise DidaAuthError("Direct sign-on failed: network error") from None
+    except (UnicodeError, ValueError, RecursionError):
+        raise DidaAuthError("Direct sign-on failed: malformed response") from None
+    except Exception:
+        raise DidaAuthError("Direct sign-on failed: response handling error") from None
 
     try:
         data = json.loads(raw) if raw else {}
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         raise DidaAuthError("Direct sign-on returned non-JSON response.") from None
     token = data.get("token") if isinstance(data, dict) else None
     if not token:

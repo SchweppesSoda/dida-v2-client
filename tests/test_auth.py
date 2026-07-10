@@ -1,7 +1,9 @@
+import io
 import json
 import re
 import traceback
 import urllib.error
+from email.message import Message
 
 import pytest
 
@@ -254,6 +256,24 @@ def test_direct_signon_url_error_does_not_echo_credentials(monkeypatch):
     assert "PASSWORD_SENTINEL" not in str(excinfo.value)
     formatted = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
     assert "PASSWORD_SENTINEL" not in formatted
+
+
+def test_direct_signon_http_error_is_closed_and_does_not_echo_response(monkeypatch):
+    monkeypatch.setenv("DIDA_EMAIL", "user@example.com")
+    monkeypatch.setenv("DIDA_PASSWORD", "PASSWORD_SENTINEL")
+    body = io.BytesIO(b'{"error":"SERVER_SECRET_SENTINEL"}')
+
+    def fail_urlopen(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 401, "SERVER_SECRET_SENTINEL", Message(), body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+
+    with pytest.raises(DidaAuthError) as excinfo:
+        direct_signon_login(profile="dida")
+    formatted = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
+    assert "PASSWORD_SENTINEL" not in formatted
+    assert "SERVER_SECRET_SENTINEL" not in formatted
+    assert body.closed
 
 
 def test_direct_signon_rejects_invalid_device_id(monkeypatch):

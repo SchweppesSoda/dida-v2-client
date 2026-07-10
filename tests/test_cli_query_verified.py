@@ -84,7 +84,14 @@ def test_query_cli_agenda_and_priority(monkeypatch, capsys):
 
 
 def test_verified_update_cli_is_dry_run_by_default_and_applies_explicitly(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "client_from_args", lambda args: object())
+    client_calls = 0
+
+    def fake_client_from_args(args):
+        nonlocal client_calls
+        client_calls += 1
+        return object()
+
+    monkeypatch.setattr(cli, "client_from_args", fake_client_from_args)
     monkeypatch.setattr(cli, "DidaV2Verifier", FakeVerifier)
     argv = [
         "verified",
@@ -109,8 +116,10 @@ def test_verified_update_cli_is_dry_run_by_default_and_applies_explicitly(monkey
     dry_run = json.loads(capsys.readouterr().out)
     assert dry_run["dry_run"] is True
     assert dry_run["would_verified_update"]["changes"]["allDay"] is False
+    assert client_calls == 0
 
     assert cli.main([*argv, "--apply"]) == 0
+    assert client_calls == 1
     applied = json.loads(capsys.readouterr().out)["verified_update"]
     assert applied == {
         "task_id": "t1",
@@ -124,6 +133,23 @@ def test_verified_update_cli_is_dry_run_by_default_and_applies_explicitly(monkey
             "allDay": False,
         },
     }
+
+
+def test_verified_update_cli_rejects_invalid_changes_before_client_creation(monkeypatch, capsys):
+    client_calls = 0
+
+    def unexpected_client(args):
+        nonlocal client_calls
+        client_calls += 1
+        raise AssertionError("client/auth must not be constructed")
+
+    monkeypatch.setattr(cli, "client_from_args", unexpected_client)
+
+    assert cli.main(["verified", "update", "t1", "--project-id", "p1", "--priority", "2"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("ERROR:")
+    assert client_calls == 0
 
 
 def test_verified_cli_uses_verifier(monkeypatch, capsys):

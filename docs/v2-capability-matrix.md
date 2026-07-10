@@ -4,9 +4,9 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 
 ## Latest boundary probes
 
-- Source inventory on 2026-07-09 compared `tick-mcp 0.2.0`, GitHub `KpihX/tick-mcp` HEAD `d4dfb5c`, `OliverStoll/ticktick-api-v2`, and this repository.
+- Source inventory rechecked on 2026-07-10 against GitHub `KpihX/tick-mcp` HEAD `d4dfb5c`, `OliverStoll/ticktick-api-v2`, and this repository.
 - All literal v2 endpoints found in those two community codebases are now represented in this client. The only textual mismatch is `ticktick-api-v2`'s `pomodoros/timeline{timestamp_query_param}`, implemented here as `/pomodoros/timeline` plus query params.
-- GitHub `KpihX/tick-mcp` adds a higher-level layer on top of endpoints: query/search views, verified actions, and live tests. This repository now implements the first Dida365-first subset: workspace map, task query, agenda query, priority dashboard, and verified move/parent/folder writes.
+- GitHub `KpihX/tick-mcp` adds a higher-level layer on top of endpoints: query/search views, verified actions, and live tests. This repository implements a Dida365-first subset: workspace map, task query, agenda query, priority dashboard, and identity-bound verified task update/move/parent/folder writes.
 - Public Dida marketing/webapp bundles do **not** expose the logged-in task app v2 surface without a session. The sign-in bundle does confirm `POST /api/v2/user/signon?wc=true&remember=true`.
 - Live auth probe on 2026-07-09: direct Dida v2 sign-on with temporary local credentials returned a session token, and read-only `/user/status`, `/batch/check/0`, and `/habits` requests succeeded. Selenium headless could load the login page and submit the form, but no `t` cookie was issued in headless form mode; captcha/Turnstile markers were present. The package now wraps direct sign-on and uses Selenium only as fallback. Follow-up probe found Dida returns misleading `username_password_not_match` for arbitrary/non-web-like `X-Device.id`; package default is now a stable live-verified 24-hex id, overrideable via `DIDA_DEVICE_ID`.
 - Unauthenticated Dida v2 probe confirms auth boundary:
@@ -24,6 +24,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 - Prefer OS credential-vault sessions, then profile-specific local session env; direct sign-on and Selenium are fallback acquisition paths.
 - When replacing a v1 workflow, add read-back verification before trusting the write.
 - Typed batch helpers must inspect `id2error`, `errorId`, `errorCode`, and `error` in responses.
+- Automatic retries are limited to safe `GET`/`HEAD` reads. Writes are never retried automatically because their commit state can be ambiguous after a timeout.
 
 ## Implemented v2 coverage
 
@@ -31,6 +32,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 | --- | --- | --- | --- | --- |
 | Auth/session | account status | `GET /user/status` | `user_status()` | `status` |
 | Auth/session | session-first resolution and optional OS credential-vault storage | local credential vault + session env + sign-on fallbacks | `SessionStore`, `KeyringSessionStore`, `resolve_session_token()` | `auth login/status/refresh/logout` |
+| Transport | bounded transient retry for safe reads only | all `GET`/`HEAD` endpoints | 1–5 attempts, exponential jitter, capped `Retry-After`, retry statuses 429/500/502/503/504; no write retries | used internally |
 | Account | profile | `GET /user/profile` | `user_profile()` | `stats profile` |
 | Account | preferences/settings | `GET /user/preferences/settings?includeWeb=true` | `user_preferences()` | `stats preferences` |
 | Sync | full sync and bounded reusable operation snapshot | `GET /batch/check/0` | `full_sync()`, `get_snapshot()`, recursively immutable `SyncSnapshot`; read-only identity fields plus atomic `set_identity()`, newest-fetch commit ordering, TTL capped at 30 seconds, refresh supersession, and generation invalidation on writes/identity replacement | used internally |
@@ -63,6 +65,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 | Query | task filtering by project/folder/tag/text/date/priority/hierarchy | `GET /batch/check/0` | `DidaV2QueryService.query_tasks()` | `query tasks` |
 | Query | timezone-aware due/start/scheduled agenda windows | `GET /batch/check/0` | `DidaV2QueryService.query_agenda()` | `query agenda --timezone` |
 | Query | priority buckets/dashboard | `GET /batch/check/0` | `DidaV2QueryService.priority_dashboard()` | `query priority-dashboard` |
+| Verified actions | full-object task update with validated read-back fields | `POST /batch/task` + `GET /batch/check/0` | `DidaV2Verifier.verified_update_task()` | `verified update` |
 | Verified actions | read-back verified move | `POST /batch/taskProject` + `GET /batch/check/0` | `DidaV2Verifier.verified_move_task()` | `verified move` |
 | Verified actions | read-back verified parent set/unset | `POST /batch/taskParent` + `GET /batch/check/0` | `verified_set_task_parent()`, `verified_unset_task_parent()` | `verified set-parent`, `verified unset-parent` |
 | Verified actions | read-back verified project folder assignment | `POST /batch/project` + `GET /batch/check/0` | `verified_set_project_folder()` | `verified project-folder` |
@@ -76,6 +79,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
    - All public profile aliases are canonicalized before selecting keyring usernames, session/credential/device environment variables, or sign-on targets; Dida and TickTick auth material remains isolated.
    - `auth login`/`refresh` validate a new session with `/user/status` before storing it. Refresh failures preserve the old stored token; `auth status` removes a token only for structured HTTP 401 or status-less `user_not_sign_on`, not 403/429/5xx/network failures.
    - Transport HTTP failures carry structured status/error-code fields while their user-facing messages omit response bodies. Auth CLI failures use fixed output, never echo server/network exception text, and suppress hostile underlying exception causes so formatted tracebacks remain secret-free.
+   - Safe reads retry only transient network failures and HTTP 429/500/502/503/504. Attempts are bounded to 1–5, server `Retry-After` and local backoff are capped at 30 seconds, and one captured identity is reused throughout the request. POST/PUT/PATCH/DELETE are never retried automatically.
    - `KeyringSessionStore` uses the optional `secure-store` extra and never falls back to a plaintext token file.
    - Selenium fallback includes Dida365 `#emailOrPhone`, but form login can still be gated by captcha/Turnstile and may not issue `t`.
 
@@ -102,6 +106,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 7. **Saved filters, snapshots, and timezone**
    - Saved filters are read from `GET /batch/check/0`; their `rule` field is JSON encoded and evaluated locally.
    - The evaluator validates the complete AST before explanation or task matching, including when the task collection is empty. Mixed node shapes, unknown conditions, empty groups/value lists, out-of-domain priorities, and unknown relative-date keywords fail closed instead of widening results through early returns or boolean short-circuiting.
+   - Optional metadata keys are accepted only at the rule root; hiding root metadata inside child groups or leaves is rejected. Relative `overdue` is supported only for `dueDate`; unproven `startDate=overdue` rules fail closed.
    - `SyncSnapshot` recursively freezes mappings/lists, including structured checkpoints. Client list methods return deep mutable copies, so caller mutation cannot change cached account data.
    - Snapshot reuse captures profile/token request identity atomically, is synchronized and generation checked, and allows only the newest eligible fetch response to commit. Identity fields are read-only and cross-profile/session replacement uses one atomic `set_identity()` call. TTL is constrained to finite values from 0 through 30 seconds; explicit refresh supersedes older fetches, while any write attempt (including unknown/malformed responses) or identity replacement invalidates stale cache generations.
    - Saved-filter queries bind their snapshot, account-preference request, and profile fallback to the same captured identity, so concurrent identity replacement cannot mix accounts inside one result.
@@ -126,8 +131,9 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
    - Keep reminders on v1 until a v2 live sandbox proves reliable behavior.
 
 2. **Write verification**
-   - Dedicated verified commands now cover task moves, parent set/unset, and project folder assignment.
-   - Next: make selected `--apply` commands opt into these verified paths by default once auth/cookie cache is reliable.
+   - Dedicated verified commands cover validated full-object task updates, task moves, parent set/unset, and project folder assignment.
+   - Verified operations hold one identity across pre-read/write/read-back, require exact endpoint-specific acknowledgement with a non-empty revision value, refresh one post-write snapshot, and fail closed on mismatch. Generic verified task updates additionally require and send the current snapshot `etag`, reject naive datetimes or invalid IANA zones, detach finite-JSON input before network I/O, and validate dry-runs before authentication/client creation.
+   - Next: make selected routine `--apply` commands opt into these verified paths by default after disposable-account live validation.
    - Keep detecting `id2error` and non-empty error maps for every batch write.
 
 3. **Coverage expansion after endpoint verification**

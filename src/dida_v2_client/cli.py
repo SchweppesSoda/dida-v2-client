@@ -273,7 +273,6 @@ def build_parser() -> argparse.ArgumentParser:
     all_day.add_argument("--all-day", dest="all_day", action="store_true")
     all_day.add_argument("--not-all-day", dest="all_day", action="store_false")
     v_update.set_defaults(all_day=None)
-    v_update.add_argument("--items-json")
     v_update.add_argument("--apply", action="store_true")
     v_move = verified_sub.add_parser("move")
     v_move.add_argument("task_id")
@@ -323,7 +322,10 @@ def _json_list_arg(value: str | None) -> list[Any]:
     if value.startswith("@"):
         with open(value[1:], "r", encoding="utf-8") as handle:
             value = handle.read()
-    parsed = json.loads(value)
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, RecursionError):
+        raise DidaV2Error("JSON argument is not valid JSON") from None
     if not isinstance(parsed, list):
         raise DidaV2Error("JSON argument must be a list")
     return parsed
@@ -377,8 +379,6 @@ def _verified_task_changes_from_args(args: argparse.Namespace) -> dict[str, Any]
         for attr, api_key in field_map.items()
         if (value := getattr(args, attr, None)) is not None
     }
-    if getattr(args, "items_json", None) is not None:
-        changes["items"] = _json_list_arg(args.items_json)
     return changes
 
 
@@ -455,6 +455,7 @@ def _run_auth(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    verified_update_changes: dict[str, Any] | None = None
     try:
         if args.resource == "auth":
             try:
@@ -462,6 +463,17 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 print("ERROR: Authentication operation failed.", file=sys.stderr)
                 return 2
+        if args.resource == "verified" and args.action == "update":
+            validator = DidaV2Verifier(None)
+            verified_update_changes = validator.validate_task_changes(_verified_task_changes_from_args(args))
+            if not args.apply:
+                payload = {
+                    "task_id": args.task_id,
+                    "project_id": args.project_id,
+                    "changes": verified_update_changes,
+                }
+                print(json.dumps({"dry_run": True, "would_verified_update": payload}, ensure_ascii=False))
+                return 0
         client = client_from_args(args)
         if args.resource == "filters":
             if args.action == "list":
@@ -548,17 +560,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.resource == "verified":
             verifier = DidaV2Verifier(client)
             if args.action == "update":
-                changes = verifier.validate_task_changes(_verified_task_changes_from_args(args))
-                payload = {"task_id": args.task_id, "project_id": args.project_id, "changes": changes}
-                if not args.apply:
-                    print(json.dumps({"dry_run": True, "would_verified_update": payload}, ensure_ascii=False))
-                    return 0
+                if verified_update_changes is None:
+                    raise DidaV2Error("Verified task update validation did not run")
                 print(
                     json.dumps(
                         verifier.verified_update_task(
                             args.task_id,
                             project_id=args.project_id,
-                            changes=changes,
+                            changes=verified_update_changes,
                         ),
                         ensure_ascii=False,
                         indent=2,

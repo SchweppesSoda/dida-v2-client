@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import re
 from functools import wraps
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .datetime_utils import parse_dida_datetime
 from .snapshot import SyncSnapshot, thaw_snapshot_value
@@ -45,11 +48,12 @@ class DidaV2Verifier:
         "tags",
         "columnId",
         "allDay",
-        "items",
     }
     _TASK_STRING_FIELDS = {"title", "content", "desc", "dueDate", "startDate", "timeZone", "columnId"}
     _TASK_PRIORITIES = {0, 1, 3, 5}
     _TASK_STATUSES = {-1, 0, 2}
+    _SERVER_MANAGED_TASK_FIELDS = {"etag", "modifiedTime"}
+    _EXPLICIT_OFFSET = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 
     def __init__(self, client: Any):
         self.client = client
@@ -64,17 +68,25 @@ class DidaV2Verifier:
     ) -> dict[str, Any]:
         normalized = self.validate_task_changes(changes)
         before = self._get_task(self._readback_snapshot(), task_id, project_id=project_id)
-        payload = {**before, **normalized, "id": task_id, "projectId": project_id}
+        revision = before.get("etag")
+        if not isinstance(revision, str) or not revision:
+            raise VerificationError("Verified task update requires a snapshot revision etag")
+        payload = {**before, **normalized, "id": task_id, "projectId": project_id, "etag": revision}
+        try:
+            payload = json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False))
+        except (TypeError, ValueError, RecursionError):
+            raise VerificationError("Verified task snapshot must contain only finite JSON values") from None
         result = self.client.update_task(payload)
-        self._ensure_batch_ok(result)
+        self._ensure_batch_ok(result, expected_ids={task_id})
         task = self._get_task(self._readback_snapshot(), task_id, project_id=project_id)
-        mismatches = {
-            field: {"expected": expected, "actual": task.get(field)}
-            for field, expected in normalized.items()
-            if not self._task_field_matches(field, expected, task.get(field))
-        }
+        checked_fields = sorted(set(payload) - self._SERVER_MANAGED_TASK_FIELDS)
+        mismatches = [
+            field
+            for field in checked_fields
+            if not self._task_field_matches(field, payload[field], task.get(field))
+        ]
         if mismatches:
-            fields = ", ".join(sorted(mismatches))
+            fields = ", ".join(mismatches)
             raise VerificationError(f"Task update did not verify after v2 write: {fields}")
         return {
             "verified": True,
@@ -83,7 +95,7 @@ class DidaV2Verifier:
             "verification": {
                 "task_id": task_id,
                 "project_id": project_id,
-                "checked_fields": sorted(normalized),
+                "checked_fields": checked_fields,
             },
         }
 
@@ -102,10 +114,18 @@ class DidaV2Verifier:
             raise VerificationError("Verified task title must not be empty")
         for field in ("dueDate", "startDate"):
             if field in normalized:
+                raw_datetime = normalized[field].strip()
+                if not self._EXPLICIT_OFFSET.search(raw_datetime):
+                    raise VerificationError(f"Verified task datetime requires an explicit UTC offset: {field}")
                 try:
-                    parse_dida_datetime(normalized[field])
-                except (TypeError, ValueError):
+                    parse_dida_datetime(raw_datetime)
+                except (TypeError, ValueError, OverflowError):
                     raise VerificationError(f"Verified task datetime is invalid: {field}") from None
+        if "timeZone" in normalized:
+            try:
+                ZoneInfo(normalized["timeZone"])
+            except (ZoneInfoNotFoundError, ValueError):
+                raise VerificationError("Verified task timeZone must be a valid IANA zone") from None
         if "priority" in normalized and (
             type(normalized["priority"]) is not int or normalized["priority"] not in self._TASK_PRIORITIES
         ):
@@ -116,17 +136,18 @@ class DidaV2Verifier:
             raise VerificationError("Verified task status is invalid")
         if "allDay" in normalized and type(normalized["allDay"]) is not bool:
             raise VerificationError("Verified task allDay must be boolean")
-        if "tags" in normalized and (
-            not isinstance(normalized["tags"], list)
-            or any(not isinstance(tag, str) or not tag for tag in normalized["tags"])
-        ):
-            raise VerificationError("Verified task tags must be a list of non-empty strings")
-        if "items" in normalized and (
-            not isinstance(normalized["items"], list)
-            or any(not isinstance(item, dict) for item in normalized["items"])
-        ):
-            raise VerificationError("Verified task items must be a list of objects")
-        return normalized
+        if "tags" in normalized:
+            tags = normalized["tags"]
+            if (
+                not isinstance(tags, list)
+                or any(not isinstance(tag, str) or not tag for tag in tags)
+                or len(set(tags)) != len(tags)
+            ):
+                raise VerificationError("Verified task tags must be a unique list of non-empty strings")
+        try:
+            return json.loads(json.dumps(normalized, ensure_ascii=False, allow_nan=False))
+        except (TypeError, ValueError, RecursionError):
+            raise VerificationError("Verified task changes must contain only finite JSON values") from None
 
     @staticmethod
     def _task_field_matches(field: str, expected: Any, actual: Any) -> bool:
@@ -141,8 +162,13 @@ class DidaV2Verifier:
 
     @_identity_bound
     def verified_set_task_parent(self, task_id: str, *, project_id: str, parent_id: str) -> dict[str, Any]:
+        if task_id == parent_id:
+            raise VerificationError("A task cannot be its own verified parent")
+        before = self._readback_snapshot()
+        self._get_task(before, task_id, project_id=project_id)
+        self._get_task(before, parent_id, project_id=project_id)
         result = self.client.set_task_parent(task_id, project_id=project_id, parent_id=parent_id)
-        self._ensure_batch_ok(result)
+        self._ensure_batch_ok(result, expected_ids={task_id})
         snapshot = self._readback_snapshot()
         child = self._get_task(snapshot, task_id, project_id=project_id)
         parent = self._get_task(snapshot, parent_id, project_id=project_id)
@@ -165,8 +191,13 @@ class DidaV2Verifier:
 
     @_identity_bound
     def verified_unset_task_parent(self, task_id: str, *, project_id: str, old_parent_id: str) -> dict[str, Any]:
+        before = self._readback_snapshot()
+        child_before = self._get_task(before, task_id, project_id=project_id)
+        parent_before = self._get_task(before, old_parent_id, project_id=project_id)
+        if child_before.get("parentId") != old_parent_id or task_id not in (parent_before.get("childIds") or []):
+            raise VerificationError("Verified unset-parent source relationship was not established")
         result = self.client.unset_task_parent(task_id, project_id=project_id, old_parent_id=old_parent_id)
-        self._ensure_batch_ok(result)
+        self._ensure_batch_ok(result, expected_ids={task_id})
         snapshot = self._readback_snapshot()
         child = self._get_task(snapshot, task_id, project_id=project_id)
         old_parent = self._get_task(snapshot, old_parent_id, project_id=project_id)
@@ -189,8 +220,11 @@ class DidaV2Verifier:
 
     @_identity_bound
     def verified_move_task(self, task_id: str, *, from_project_id: str, to_project_id: str) -> dict[str, Any]:
+        if from_project_id == to_project_id:
+            raise VerificationError("Verified task move requires different source and destination projects")
+        self._get_task(self._readback_snapshot(), task_id, project_id=from_project_id)
         result = self.client.move_task(task_id, from_project_id=from_project_id, to_project_id=to_project_id)
-        self._ensure_batch_ok(result)
+        self._ensure_batch_ok(result, expected_ids={task_id})
         snapshot = self._readback_snapshot()
         task = self._find_task(snapshot, task_id, project_id=to_project_id)
         if task is None or task.get("projectId") != to_project_id:
@@ -222,7 +256,7 @@ class DidaV2Verifier:
     @_identity_bound
     def verified_set_project_folder(self, project_id: str, folder_id: str | None) -> dict[str, Any]:
         result = self.client.set_project_folder(project_id, folder_id)
-        self._ensure_batch_ok(result)
+        self._ensure_batch_ok(result, expected_ids={project_id})
         snapshot = self._readback_snapshot()
         project = self._find_project(snapshot, project_id)
         if project is None or project.get("groupId") != folder_id:
@@ -238,11 +272,18 @@ class DidaV2Verifier:
             },
         }
 
-    def _ensure_batch_ok(self, response: Any) -> None:
+    def _ensure_batch_ok(self, response: Any, *, expected_ids: set[str]) -> None:
         ensure = getattr(self.client, "ensure_batch_ok", None)
         if not callable(ensure):
             raise VerificationError("Verified actions require strict batch validation")
         ensure(response)
+        acknowledgements = response.get("id2etag") if isinstance(response, dict) else None
+        if (
+            not isinstance(acknowledgements, dict)
+            or set(acknowledgements) != expected_ids
+            or any(not isinstance(value, str) or not value for value in acknowledgements.values())
+        ):
+            raise VerificationError("Verified write did not acknowledge the expected entities")
 
     def _readback_snapshot(self) -> SyncSnapshot:
         get_snapshot = getattr(self.client, "_get_snapshot_with_identity", None)

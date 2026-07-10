@@ -18,7 +18,7 @@ class FakeClient:
         self.task_updates = []
         self.tasks = [
             {"id": "parent", "projectId": "p1", "title": "Parent", "childIds": []},
-            {"id": "child", "projectId": "p1", "title": "Child"},
+            {"id": "child", "projectId": "p1", "title": "Child", "etag": "etag-child"},
             {"id": "moved", "projectId": "p1", "title": "Move me"},
         ]
         self.projects = [
@@ -145,6 +145,17 @@ def test_verified_set_and_unset_task_parent_reads_back_structure():
     assert unset_result["verification"]["child_parent_id"] is None
 
 
+def test_verified_parent_actions_reject_unproven_source_before_write():
+    client = FakeClient()
+    verifier = DidaV2Verifier(client)
+
+    with pytest.raises(VerificationError, match="not found"):
+        verifier.verified_set_task_parent("child", project_id="p1", parent_id="missing")
+    with pytest.raises(VerificationError, match="source relationship"):
+        verifier.verified_unset_task_parent("child", project_id="p1", old_parent_id="parent")
+    assert client.parents == []
+
+
 def test_verified_move_task_reads_destination_project():
     client = FakeClient()
     verifier = DidaV2Verifier(client)
@@ -154,6 +165,15 @@ def test_verified_move_task_reads_destination_project():
     assert result["verified"] is True
     assert result["verification"]["destination_project_id"] == "p2"
     assert result["task"]["projectId"] == "p2"
+
+
+def test_verified_move_task_rejects_unproven_source_before_write():
+    client = FakeClient()
+    next(task for task in client.tasks if task["id"] == "moved")["projectId"] = "p2"
+
+    with pytest.raises(VerificationError, match="not found"):
+        DidaV2Verifier(client).verified_move_task("moved", from_project_id="p1", to_project_id="p2")
+    assert client.moves == []
 
 
 def test_verified_project_folder_reads_back_group_id():
@@ -182,7 +202,6 @@ def test_verified_update_task_merges_full_record_and_checks_supported_fields():
             "tags": ["work", "focus"],
             "columnId": "column-1",
             "allDay": False,
-            "items": [{"id": "item-1", "title": "Step", "status": 0}],
         },
     )
 
@@ -191,8 +210,9 @@ def test_verified_update_task_merges_full_record_and_checks_supported_fields():
         "allDay",
         "columnId",
         "dueDate",
-        "items",
+        "id",
         "priority",
+        "projectId",
         "startDate",
         "status",
         "tags",
@@ -200,6 +220,7 @@ def test_verified_update_task_merges_full_record_and_checks_supported_fields():
     ]
     assert client.task_updates[0]["id"] == "child"
     assert client.task_updates[0]["projectId"] == "p1"
+    assert client.task_updates[0]["etag"] == "etag-child"
     assert client.task_updates[0]["title"] == "Updated"
     assert result["task"]["tags"] == ["work", "focus"]
 
@@ -213,19 +234,33 @@ def test_verified_update_task_merges_full_record_and_checks_supported_fields():
         {"status": 1},
         {"tags": "work"},
         {"tags": ["work", 1]},
+        {"tags": ["work", "work"]},
         {"allDay": 1},
         {"items": ["not-an-object"]},
+        {"items": [{"title": object()}]},
         {"reminders": [{"trigger": "PT0S"}]},
         {"repeatFlag": "RRULE:FREQ=DAILY"},
         {"projectId": "p2"},
         {"id": "other"},
         {"title": "   "},
         {"dueDate": "not-a-date"},
+        {"dueDate": "2026-07-11T09:00:00"},
+        {"startDate": "2026-07-11T09:00:00"},
+        {"timeZone": "Not/AZone"},
     ],
 )
 def test_verified_update_task_rejects_unverified_or_malformed_changes(changes):
     with pytest.raises(VerificationError):
         DidaV2Verifier(FakeClient()).verified_update_task("child", project_id="p1", changes=changes)
+
+
+def test_verified_task_change_validation_detaches_mutable_input():
+    changes = {"tags": ["work"]}
+    normalized = DidaV2Verifier(FakeClient()).validate_task_changes(changes)
+
+    changes["tags"].append("mutated")
+
+    assert normalized == {"tags": ["work"]}
 
 
 def test_verified_update_task_accepts_equivalent_datetime_formatting():
@@ -255,6 +290,61 @@ def test_verified_update_task_fails_when_readback_differs():
             project_id="p1",
             changes={"priority": 5},
         )
+
+
+def test_verified_update_task_detects_unintended_change_to_existing_field():
+    class CollateralMutationClient(FakeClient):
+        def update_task(self, task):
+            result = super().update_task(task)
+            next(item for item in self.tasks if item["id"] == task["id"])["title"] = "Unexpected mutation"
+            return result
+
+    with pytest.raises(VerificationError, match="title"):
+        DidaV2Verifier(CollateralMutationClient()).verified_update_task(
+            "child",
+            project_id="p1",
+            changes={"priority": 5},
+        )
+
+
+def test_verified_update_task_rejects_nonfinite_snapshot_before_write():
+    client = FakeClient()
+    next(task for task in client.tasks if task["id"] == "child")["content"] = float("nan")
+
+    with pytest.raises(VerificationError, match="snapshot"):
+        DidaV2Verifier(client).verified_update_task(
+            "child",
+            project_id="p1",
+            changes={"priority": 5},
+        )
+    assert client.task_updates == []
+
+
+def test_verified_update_task_rejects_acknowledgement_for_wrong_entity():
+    class WrongAckClient(FakeClient):
+        def update_task(self, task):
+            super().update_task(task)
+            return {"id2etag": {"unrelated-task": "etag"}, "id2error": {}}
+
+    with pytest.raises(VerificationError, match="expected entities"):
+        DidaV2Verifier(WrongAckClient()).verified_update_task(
+            "child",
+            project_id="p1",
+            changes={"priority": 5},
+        )
+
+
+def test_verified_update_task_rejects_missing_snapshot_revision_before_write():
+    client = FakeClient()
+    next(task for task in client.tasks if task["id"] == "child").pop("etag")
+
+    with pytest.raises(VerificationError, match="revision"):
+        DidaV2Verifier(client).verified_update_task(
+            "child",
+            project_id="p1",
+            changes={"priority": 5},
+        )
+    assert client.task_updates == []
 
 
 def test_verified_update_task_rejects_missing_original_task():
@@ -332,7 +422,7 @@ def test_verified_operation_blocks_identity_switch_until_readback(monkeypatch):
     assert all(urlparse(url).netloc == "api.dida365.com" for url in seen_urls)
 
 
-def test_verified_parent_readback_uses_one_refreshed_snapshot(monkeypatch):
+def test_verified_parent_uses_one_prewrite_and_one_refreshed_postwrite_snapshot(monkeypatch):
     class FakeResponse:
         def __init__(self, body):
             self._body = body
@@ -381,4 +471,4 @@ def test_verified_parent_readback_uses_one_refreshed_snapshot(monkeypatch):
     with pytest.raises(VerificationError, match="did not verify"):
         DidaV2Verifier(client).verified_set_task_parent("child", project_id="p1", parent_id="parent")
 
-    assert get_calls == 1
+    assert get_calls == 2

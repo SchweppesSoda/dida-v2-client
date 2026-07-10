@@ -1,6 +1,7 @@
 import io
 import traceback
 import urllib.error
+from email.message import Message
 from threading import Event, Thread
 from urllib.parse import parse_qs, urlparse
 
@@ -111,6 +112,18 @@ def test_request_exposes_structured_http_status_without_response_secrets(monkeyp
     assert "TOKEN_SENTINEL" not in str(excinfo.value)
     formatted = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
     assert "TOKEN_SENTINEL" not in formatted
+
+
+def test_request_discards_unrecognized_server_error_code(monkeypatch):
+    def fake_urlopen(req, timeout):
+        body = b'{"errorCode":"SERVER_SECRET_SENTINEL"}'
+        raise urllib.error.HTTPError(req.full_url, 400, "bad", Message(), io.BytesIO(body))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(DidaV2HTTPError) as excinfo:
+        DidaV2Client(DidaConfig.default(), session_token="TOKEN").user_status()
+    assert excinfo.value.error_code is None
+    assert "SERVER_SECRET_SENTINEL" not in repr(excinfo.value.__dict__)
 
 
 def test_request_sanitizes_network_failure_reason(monkeypatch):

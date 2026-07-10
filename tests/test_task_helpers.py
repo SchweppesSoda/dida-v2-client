@@ -1,4 +1,5 @@
 import json
+import traceback
 from urllib.parse import urlparse
 
 import pytest
@@ -57,6 +58,23 @@ def test_typed_task_helpers_validate_batch_errors(monkeypatch):
 
     with pytest.raises(DidaV2Error, match="V2 batch response contains errors"):
         client.delete_task("t1", project_id="p1")
+
+
+@pytest.mark.parametrize(
+    ("method", "response"),
+    [
+        ("ensure_batch_ok", {"id2etag": {}, "id2error": {"t1": "SERVER_SECRET_SENTINEL"}}),
+        ("ensure_batch_ok", {"error": "SERVER_SECRET_SENTINEL"}),
+        ("ensure_ok_response", {"error": "SERVER_SECRET_SENTINEL"}),
+    ],
+)
+def test_server_controlled_error_values_do_not_leak(method, response):
+    client = DidaV2Client(DidaConfig.default(), session_token="SECRET")
+
+    with pytest.raises(DidaV2Error) as excinfo:
+        getattr(client, method)(response)
+    formatted = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
+    assert "SERVER_SECRET_SENTINEL" not in formatted
 
 
 @pytest.mark.parametrize(

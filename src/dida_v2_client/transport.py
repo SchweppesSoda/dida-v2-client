@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import random
@@ -43,6 +44,7 @@ class DidaV2HTTPError(DidaV2Error):
 class DidaV2Client:
     _SAFE_READ_METHODS = frozenset({"GET", "HEAD"})
     _RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+    _STRUCTURED_ERROR_CODES = frozenset({"user_not_sign_on"})
     _MAX_RETRY_DELAY_SECONDS = 30.0
 
     def __init__(
@@ -188,11 +190,15 @@ class DidaV2Client:
         }
 
     def _retry_after_seconds(self, exc: urllib.error.HTTPError) -> float | None:
-        headers = getattr(exc, "headers", None)
-        value = headers.get("Retry-After") if headers is not None else None
-        if not value:
+        try:
+            headers = getattr(exc, "headers", None)
+            value = headers.get("Retry-After") if headers is not None else None
+            if not value:
+                return None
+            text = str(value).strip()
+        except Exception:
             return None
-        text = str(value).strip()
+        from_http_date = False
         try:
             seconds = float(text)
         except ValueError:
@@ -201,10 +207,13 @@ class DidaV2Client:
                 if target.tzinfo is None:
                     return None
                 seconds = target.timestamp() - self._wall_clock()
-            except (TypeError, ValueError, OverflowError):
+                from_http_date = True
+            except Exception:
                 return None
-        if not math.isfinite(seconds) or seconds < 0:
+        if not math.isfinite(seconds):
             return None
+        if seconds < 0:
+            return 0.0 if from_http_date else None
         return min(seconds, self._MAX_RETRY_DELAY_SECONDS)
 
     def _retry_delay(self, retry_index: int, exc: urllib.error.HTTPError | None = None) -> float:
@@ -222,7 +231,15 @@ class DidaV2Client:
         return min(delay, self._MAX_RETRY_DELAY_SECONDS)
 
     @staticmethod
+    def _close_http_error(exc: urllib.error.HTTPError) -> None:
+        try:
+            exc.close()
+        except Exception:
+            pass
+
+    @classmethod
     def _structured_http_error(
+        cls,
         exc: urllib.error.HTTPError,
         method: str,
         endpoint: str,
@@ -232,16 +249,18 @@ class DidaV2Client:
             body = exc.read().decode("utf-8", "replace")
         except Exception:
             pass
+        finally:
+            cls._close_http_error(exc)
         error_code = None
         try:
             parsed = json.loads(body) if body else {}
             if isinstance(parsed, dict):
                 for key in ("errorCode", "errorId", "error"):
                     value = parsed.get(key)
-                    if isinstance(value, str) and value:
+                    if isinstance(value, str) and value in cls._STRUCTURED_ERROR_CODES:
                         error_code = value
                         break
-        except (json.JSONDecodeError, UnicodeError):
+        except (json.JSONDecodeError, UnicodeError, RecursionError):
             pass
         return DidaV2HTTPError(exc.code, method, endpoint, error_code=error_code)
 
@@ -263,7 +282,10 @@ class DidaV2Client:
         url = f"{config.api_v2_base.rstrip('/')}/{endpoint.lstrip('/')}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
-        data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        try:
+            data = None if payload is None else json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError, RecursionError):
+            raise DidaV2Error(f"Request payload is not valid JSON for {method_upper} {endpoint}") from None
         req = urllib.request.Request(
             url,
             data=data,
@@ -275,24 +297,35 @@ class DidaV2Client:
             for attempt in range(attempts):
                 try:
                     with urllib.request.urlopen(req, timeout=30) as resp:
-                        raw = resp.read().decode("utf-8", "replace")
+                        raw = resp.read().decode("utf-8")
                     if not raw:
                         return {}
                     try:
                         return json.loads(raw)
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, RecursionError):
                         raise DidaV2Error(f"Malformed JSON response from {method_upper} {endpoint}") from None
                 except urllib.error.HTTPError as exc:
                     retryable = exc.code in self._RETRYABLE_HTTP_STATUSES and attempt + 1 < attempts
                     if retryable:
-                        self._sleep(self._retry_delay(attempt, exc))
+                        try:
+                            delay = self._retry_delay(attempt, exc)
+                        finally:
+                            self._close_http_error(exc)
+                        self._sleep(delay)
                         continue
                     raise self._structured_http_error(exc, method_upper, endpoint) from None
-                except (urllib.error.URLError, OSError):
+                except (urllib.error.URLError, OSError, http.client.HTTPException):
                     if attempt + 1 < attempts:
                         self._sleep(self._retry_delay(attempt))
                         continue
                     raise DidaV2Error(f"Network request failed for {method_upper} {endpoint}") from None
+                except DidaV2Error:
+                    raise
+                except Exception:
+                    if attempt + 1 < attempts:
+                        self._sleep(self._retry_delay(attempt))
+                        continue
+                    raise DidaV2Error(f"Response handling failed for {method_upper} {endpoint}") from None
             raise AssertionError("unreachable retry loop")
         finally:
             if not safe_read:
@@ -417,13 +450,12 @@ class DidaV2Client:
                 raise DidaV2Error("V2 batch returned an unrecognized response shape")
             errors = self.batch_errors(response)
             if errors:
-                raise DidaV2Error(f"V2 batch response contains errors: {json.dumps(errors, ensure_ascii=False)}")
+                raise DidaV2Error("V2 batch response contains errors")
             if not response["id2etag"]:
                 raise DidaV2Error("V2 batch returned an unrecognized response shape")
             return response
         if fields <= error_fields and all(isinstance(response[field], str) and response[field] for field in fields):
-            errors = {field: response[field] for field in fields}
-            raise DidaV2Error(f"V2 batch response contains errors: {json.dumps(errors, ensure_ascii=False)}")
+            raise DidaV2Error("V2 batch response contains errors")
         raise DidaV2Error("V2 batch returned an unrecognized response shape")
 
     def ensure_ok_response(self, response: Any) -> Any:
@@ -435,9 +467,7 @@ class DidaV2Client:
             if fields and fields <= error_fields and all(
                 isinstance(response[field], str) and response[field] for field in fields
             ):
-                raise DidaV2Error(
-                    f"V2 operation returned errors: {json.dumps(response, ensure_ascii=False)}"
-                )
+                raise DidaV2Error("V2 operation returned errors")
         raise DidaV2Error("V2 operation returned an unrecognized response shape")
 
     def create_task(self, task: dict[str, Any]) -> Any:

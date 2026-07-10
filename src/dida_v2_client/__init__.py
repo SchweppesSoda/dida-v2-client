@@ -12,6 +12,9 @@ from .query import DidaV2QueryService
 from .snapshot import SyncSnapshot
 from .transport import DidaV2Client, DidaV2Error, DidaV2HTTPError
 from .verify import DidaV2Verifier, VerificationError
+from .version import package_version
+
+__version__ = package_version()
 
 __all__ = [
     "DidaConfig",
@@ -29,6 +32,7 @@ __all__ = [
     "SyncSnapshot",
     "DidaV2Verifier",
     "VerificationError",
+    "__version__",
     "direct_signon_login",
     "resolve_session_token",
     "selenium_headless_login",
