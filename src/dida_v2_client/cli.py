@@ -224,6 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     agenda.add_argument("from_dt")
     agenda.add_argument("to_dt")
     agenda.add_argument("--date-field", choices=["scheduled", "due", "start"], default="scheduled")
+    agenda.add_argument("--timezone")
     agenda.add_argument("--tag", action="append", dest="tags")
     agenda.add_argument("--text", dest="text_query")
     agenda.add_argument("--limit", type=int, default=50)
@@ -362,6 +363,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.action == "agenda":
                 agenda_kwargs: dict[str, Any] = {"date_field": args.date_field}
+                if args.timezone:
+                    agenda_kwargs["timezone"] = args.timezone
                 if args.tags:
                     agenda_kwargs["tags"] = args.tags
                 if args.text_query:

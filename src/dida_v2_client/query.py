@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from typing import Any
+
+from .datetime_utils import parse_dida_datetime
 
 
 class DidaV2QueryService:
@@ -111,6 +113,7 @@ class DidaV2QueryService:
         limit: int = 50,
         sort_by: str = "dueDate",
         descending: bool = False,
+        timezone: str | None = None,
     ) -> dict[str, Any]:
         projects = self._projects()
         folders = self._folders()
@@ -155,9 +158,9 @@ class DidaV2QueryService:
                 continue
             if subtasks_only and not is_subtask:
                 continue
-            if not self._in_range(task.get("dueDate"), due_from, due_to):
+            if not self._in_range(task.get("dueDate"), due_from, due_to, timezone):
                 continue
-            if not self._in_range(task.get("startDate"), start_from, start_to):
+            if not self._in_range(task.get("startDate"), start_from, start_to, timezone):
                 continue
 
             project = project_by_id.get(project_id, {})
@@ -200,13 +203,23 @@ class DidaV2QueryService:
         *,
         date_field: str = "scheduled",
         limit: int = 50,
+        timezone: str | None = None,
         **filters: Any,
     ) -> dict[str, Any]:
-        result = self.query_tasks(limit=10000, **filters)
-        items = [item for item in result["items"] if self._matches_agenda_window(item, from_dt, to_dt, date_field)]
+        result = self.query_tasks(limit=10000, timezone=timezone, **filters)
+        items = [
+            item
+            for item in result["items"]
+            if self._matches_agenda_window(item, from_dt, to_dt, date_field, timezone)
+        ]
         result["items"] = items[:limit]
         result["count"] = len(result["items"])
-        result["agenda_window"] = {"from": from_dt, "to": to_dt, "date_field": date_field}
+        result["agenda_window"] = {
+            "from": from_dt,
+            "to": to_dt,
+            "date_field": date_field,
+            "timezone": timezone,
+        }
         return result
 
     def priority_dashboard(self, *, limit: int = 50, **filters: Any) -> dict[str, Any]:
@@ -295,34 +308,45 @@ class DidaV2QueryService:
             return all(word in blob for word in words)
         return any(word in blob for word in words)
 
-    def _in_range(self, raw: Any, start: str | None, end: str | None) -> bool:
+    def _in_range(
+        self,
+        raw: Any,
+        start: str | None,
+        end: str | None,
+        timezone_name: str | None = None,
+    ) -> bool:
         if not start and not end:
             return True
         if not raw:
             return False
-        value = self._date_key(str(raw))
-        if start and value < self._date_key(start):
+        value = self._date_key(str(raw), timezone_name)
+        if start and value < self._date_key(start, timezone_name):
             return False
-        if end and value > self._date_key(end):
+        if end and value > self._date_key(end, timezone_name):
             return False
         return True
 
-    def _matches_agenda_window(self, task: dict[str, Any], start: str, end: str, date_field: str) -> bool:
+    def _matches_agenda_window(
+        self,
+        task: dict[str, Any],
+        start: str,
+        end: str,
+        date_field: str,
+        timezone_name: str | None = None,
+    ) -> bool:
         if date_field == "due":
-            return self._in_range(task.get("dueDate"), start, end)
+            return self._in_range(task.get("dueDate"), start, end, timezone_name)
         if date_field == "start":
-            return self._in_range(task.get("startDate"), start, end)
-        return self._in_range(task.get("dueDate"), start, end) or self._in_range(task.get("startDate"), start, end)
+            return self._in_range(task.get("startDate"), start, end, timezone_name)
+        return self._in_range(task.get("dueDate"), start, end, timezone_name) or self._in_range(
+            task.get("startDate"), start, end, timezone_name
+        )
 
-    def _date_key(self, raw: str) -> str:
-        normalized = raw.replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(normalized).isoformat()
-        except ValueError:
-            return raw
+    def _date_key(self, raw: str, timezone_name: str | None = None) -> datetime:
+        return parse_dida_datetime(raw, assume_timezone=timezone_name or "UTC").astimezone(dt_timezone.utc)
 
     def _sort_value(self, item: dict[str, Any], sort_by: str) -> Any:
         if sort_by in {"dueDate", "startDate", "createdTime", "modifiedTime"}:
             value = item.get(sort_by)
-            return (value is None, self._date_key(str(value)) if value else "")
+            return (value is None, self._date_key(str(value)).timestamp() if value else 0.0)
         return item.get(sort_by) or ""

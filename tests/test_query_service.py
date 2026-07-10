@@ -106,6 +106,33 @@ def test_query_agenda_matches_due_or_start_window():
     assert {item["id"] for item in scheduled["items"]} == {"t1", "t3"}
 
 
+def test_query_agenda_compares_utc_task_dates_in_requested_timezone():
+    class TimezoneClient(FakeClient):
+        def list_tasks(self):
+            return [
+                {
+                    "id": "tz-task",
+                    "projectId": "p-work",
+                    "title": "Local midnight",
+                    "priority": 5,
+                    "dueDate": "2026-07-09T16:00:00.000+0000",
+                    "timeZone": "Asia/Shanghai",
+                }
+            ]
+
+    service = DidaV2QueryService(TimezoneClient())
+
+    result = service.query_agenda(
+        "2026-07-10T00:00:00+08:00",
+        "2026-07-10T23:59:59+08:00",
+        date_field="due",
+        timezone="Asia/Shanghai",
+    )
+
+    assert [item["id"] for item in result["items"]] == ["tz-task"]
+    assert result["agenda_window"]["timezone"] == "Asia/Shanghai"
+
+
 def test_priority_dashboard_splits_high_medium_low():
     service = DidaV2QueryService(FakeClient())
 

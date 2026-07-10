@@ -52,11 +52,23 @@ def test_query_cli_agenda_and_priority(monkeypatch, capsys):
     monkeypatch.setattr(cli, "client_from_args", lambda args: object())
     monkeypatch.setattr(cli, "DidaV2QueryService", FakeQueryService)
 
-    assert cli.main(["query", "agenda", "2026-07-09", "2026-07-10", "--date-field", "scheduled"]) == 0
+    assert cli.main(
+        [
+            "query",
+            "agenda",
+            "2026-07-09",
+            "2026-07-10",
+            "--date-field",
+            "scheduled",
+            "--timezone",
+            "Asia/Shanghai",
+        ]
+    ) == 0
     assert json.loads(capsys.readouterr().out)["agenda"] == {
         "from": "2026-07-09",
         "to": "2026-07-10",
         "date_field": "scheduled",
+        "timezone": "Asia/Shanghai",
     }
 
     assert cli.main(["query", "priority-dashboard", "--limit", "10"]) == 0

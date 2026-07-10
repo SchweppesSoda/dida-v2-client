@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{name = "Junfang + Hermes"}]
-dependencies = []
+dependencies = ["tzdata>=2024.1"]
 
 [project.optional-dependencies]
 headless = ["selenium>=4.20", "webdriver-manager>=4.0"]
