@@ -4,10 +4,10 @@ import argparse
 import json
 import sys
 from typing import Any
+from zoneinfo import ZoneInfoNotFoundError
 
 from .auth import resolve_session_token
 from .config import DidaConfig
-from .datetime_utils import parse_dida_datetime
 from .filters import SavedFilterEvaluator
 from .query import DidaV2QueryService
 from .transport import DidaV2Client, DidaV2Error
@@ -360,17 +360,15 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             selector = args.filter_id or args.filter_name
             if args.action == "run":
+                query_service = DidaV2QueryService(client)
                 kwargs: dict[str, Any] = {}
                 if args.timezone:
                     kwargs["timezone"] = args.timezone
                 if args.now:
-                    kwargs["now"] = parse_dida_datetime(
-                        args.now,
-                        assume_timezone=args.timezone or "Asia/Shanghai",
-                    )
+                    kwargs["now"] = args.now
                 print(
                     json.dumps(
-                        DidaV2QueryService(client).query_saved_filter(selector, **kwargs),
+                        query_service.query_saved_filter(selector, **kwargs),
                         ensure_ascii=False,
                         indent=2,
                     )
@@ -817,7 +815,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.resource == "stats" and args.action == "focus-timeline":
             print(json.dumps(client.focus_timeline(to_timestamp=args.to_timestamp), ensure_ascii=False, indent=2))
             return 0
-    except DidaV2Error as exc:
+    except (DidaV2Error, ValueError, ZoneInfoNotFoundError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     return 2

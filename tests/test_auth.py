@@ -4,7 +4,7 @@ import re
 import pytest
 
 from dida_v2_client.auth import DidaAuthError, direct_signon_login, resolve_session_token
-
+from dida_v2_client.version import USER_AGENT
 
 class FakeResponse:
     status = 200
@@ -59,6 +59,7 @@ def test_direct_signon_login_posts_to_dida_v2(monkeypatch):
     assert seen["timeout"] == 7
     assert seen["body"] == {"username": "user@example.com", "password": "local-password"}
     assert seen["headers"]["Origin"] == "https://dida365.com"
+    assert seen["headers"]["User-agent"] == USER_AGENT
     x_device = json.loads(seen["headers"]["X-device"])
     assert x_device["id"] == "6790a0b0c1d2e3f4a5b6c7d8"
     assert re.fullmatch(r"[0-9a-f]{24}", x_device["id"])

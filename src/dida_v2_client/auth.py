@@ -11,6 +11,7 @@ from typing import Callable
 
 from .config import DidaConfig
 from .transport import DidaV2Error
+from .version import USER_AGENT
 
 HeadlessLogin = Callable[..., str]
 
@@ -87,7 +88,7 @@ def direct_signon_login(
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "dida-v2-client/0.1",
+            "User-Agent": USER_AGENT,
             "Origin": cfg.web_origin,
             "Referer": cfg.signin_url,
             "X-Device": _device_header(),

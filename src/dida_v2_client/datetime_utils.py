@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
 
 def parse_dida_datetime(raw: str, *, assume_timezone: str = "UTC") -> datetime:
     normalized = raw.strip().replace("Z", "+00:00")
+    normalized = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", normalized)
     value = datetime.fromisoformat(normalized)
     if value.tzinfo is None:
         value = value.replace(tzinfo=ZoneInfo(assume_timezone))

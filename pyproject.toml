@@ -23,7 +23,7 @@ dida-v2 = "dida_v2_client.cli:main"
 packages = ["src/dida_v2_client"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/dida_v2_client", "tests", "README.md", "pyproject.toml"]
+include = ["src/dida_v2_client", "tests", "docs", "README.md", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

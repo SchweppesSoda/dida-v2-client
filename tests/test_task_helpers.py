@@ -59,6 +59,37 @@ def test_typed_task_helpers_validate_batch_errors(monkeypatch):
         client.delete_task("t1", project_id="p1")
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        [],
+        "ok",
+        1,
+        {},
+        {"unexpected": True},
+        {"id2etag": []},
+        {"id2error": []},
+        {"id2etag": {}, "unknown": 1},
+        {"id2etag": {}, "errorCode": None},
+        {"id2etag": {}, "errorId": []},
+        {"id2error": {}, "error": 0},
+    ],
+)
+def test_typed_task_helpers_reject_unknown_batch_response_shapes(response):
+    client = DidaV2Client(DidaConfig.default(), session_token="SECRET")
+
+    with pytest.raises(DidaV2Error, match="unrecognized response shape"):
+        client.ensure_batch_ok(response)
+
+
+def test_typed_task_helpers_reject_top_level_batch_errors():
+    client = DidaV2Client(DidaConfig.default(), session_token="SECRET")
+
+    with pytest.raises(DidaV2Error, match="V2 batch response contains errors"):
+        client.ensure_batch_ok({"errorId": "user_not_sign_on", "errorCode": "user_not_sign_on"})
+
+
 def test_batch_error_helpers_handle_known_error_shapes():
     client = DidaV2Client(DidaConfig.default(), session_token="SECRET")
 

@@ -32,7 +32,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 | Auth/session | account status | `GET /user/status` | `user_status()` | `status` |
 | Account | profile | `GET /user/profile` | `user_profile()` | `stats profile` |
 | Account | preferences/settings | `GET /user/preferences/settings?includeWeb=true` | `user_preferences()` | `stats preferences` |
-| Sync | full sync and reusable operation snapshot | `GET /batch/check/0` | `full_sync()`, `get_snapshot()`, `SyncSnapshot` | used internally |
+| Sync | full sync and bounded reusable operation snapshot | `GET /batch/check/0` | `full_sync()`, `get_snapshot()`, recursively immutable `SyncSnapshot`; read-only identity fields plus atomic `set_identity()`, newest-fetch commit ordering, TTL capped at 30 seconds, refresh supersession, and generation invalidation on writes/identity replacement | used internally |
 | Saved filters | list/get/find saved Web UI filters via sync | `GET /batch/check/0` | `list_filters()`, `get_filter()`, `find_filter()` | `filters list/get` |
 | Saved filters | parse, explain, and execute supported rules locally | no extra endpoint | `SavedFilterEvaluator`, `query_saved_filter()` | `filters explain/run` |
 | Tasks | active task list/get via sync | `GET /batch/check/0` | `list_tasks()`, `get_task()` | `tasks list`, `tasks get` |
@@ -94,10 +94,14 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
    - v2 has working private endpoints for operations missing in the current `dida` CLI: tag delete/rename/merge and column batch/delete.
    - Apply only after dry-run and read-back.
 
-7. **Saved filters and timezone**
+7. **Saved filters, snapshots, and timezone**
    - Saved filters are read from `GET /batch/check/0`; their `rule` field is JSON encoded and evaluated locally.
-   - The evaluator intentionally fails closed on unknown conditions instead of silently returning an incomplete view.
-   - Agenda/filter relative dates are converted through `zoneinfo`; Dida365 defaults should use `Asia/Shanghai` when no stronger account/task timezone is available.
+   - The evaluator validates the complete AST before explanation or task matching, including when the task collection is empty. Mixed node shapes, unknown conditions, empty groups/value lists, out-of-domain priorities, and unknown relative-date keywords fail closed instead of widening results through early returns or boolean short-circuiting.
+   - `SyncSnapshot` recursively freezes mappings/lists, including structured checkpoints. Client list methods return deep mutable copies, so caller mutation cannot change cached account data.
+   - Snapshot reuse captures profile/token request identity atomically, is synchronized and generation checked, and allows only the newest eligible fetch response to commit. Identity fields are read-only and cross-profile/session replacement uses one atomic `set_identity()` call. TTL is constrained to finite values from 0 through 30 seconds; explicit refresh supersedes older fetches, while any write attempt (including unknown/malformed responses) or identity replacement invalidates stale cache generations.
+   - Saved-filter queries bind their snapshot, account-preference request, and profile fallback to the same captured identity, so concurrent identity replacement cannot mix accounts inside one result.
+   - Agenda/filter relative dates are converted through `zoneinfo`. Saved-filter timezone resolution is explicit option, then account Web preference, then profile fallback (`Asia/Shanghai` for Dida and `UTC` for TickTick); the CLI resolves this before interpreting a naive `--now` value.
+   - Compact Dida offsets such as `+0000` and `+0800` are normalized for Python 3.9 compatibility and exercised by functional tests.
    - Sync evidence does not prove create/update/delete endpoints for filters. Filter CRUD remains unsupported until endpoint evidence and disposable live verification exist.
 
 ## Evidence-only / not yet wrapped
@@ -113,9 +117,9 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 ## Remaining v2-first work
 
 1. **Auth hardening**
-   - Validate Dida365 China headless login selectors.
-   - Add local cookie cache with expiry checks.
-   - Avoid chat-pasted cookies entirely.
+   - Add session-first resolution and optional OS credential-vault storage through a lazy `keyring` extra.
+   - Validate cached sessions with `/user/status` and remove only confirmed 401/`user_not_sign_on` entries.
+   - Avoid chat-pasted cookies and plaintext session files entirely.
 
 2. **Safer high-level task builders**
    - Add validated payload builders for dates, reminders, repeat rules, and checklist items.

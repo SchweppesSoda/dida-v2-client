@@ -129,7 +129,7 @@ Implemented through v0.2.0:
 - config profiles: `dida` and `ticktick` (`cn`/`global` remain compatibility aliases)
 - v2 transport with cookie auth
 - session/account: `user_status()`, `user_profile()`, `user_preferences()`
-- sync: `full_sync()`, immutable `SyncSnapshot`, and in-client snapshot reuse with write invalidation
+- sync: `full_sync()`, recursively immutable `SyncSnapshot`, deep-copy return boundaries, and a cache capped at 30 seconds; `config`/`session_token` are read-only and must be replaced together with `set_identity()`, request identities are captured atomically, only the newest eligible fetch may commit, explicit refresh supersedes older fetches, and write attempts or identity changes invalidate stale generations
 - saved Web UI filters: `list_filters()`, `get_filter()`, `find_filter()`, `SavedFilterEvaluator`, and `filters list/get/explain/run`
 - tasks: `list_tasks()`, `get_task()`, `batch_tasks()`, `batch_errors()`, `ensure_batch_ok()`, `create_task()`, `update_task()`, `delete_task()`, `complete_task()`, `reopen_task()`, `abandon_task()`, `move_tasks()`, `move_task()`, `batch_task_parents()`, `set_task_parent()`, `unset_task_parent()`, `list_closed_tasks()`, `list_trash_tasks()`
 - tags: `list_tags()`, `batch_tags()`, `create_tag()`, `update_tag()`, `delete_tag()`, `rename_tag()`, `merge_tags()`
@@ -137,11 +137,13 @@ Implemented through v0.2.0:
 - folders/projects: `list_project_folders()`, `batch_project_folders()`, `create_project_folder()`, `update_project_folder()`, `delete_project_folder()`, `list_projects()`, `batch_projects()`, `set_project_folder()`
 - habits/check-ins: `list_habits()`, `list_habit_sections()`, `batch_habits()`, `query_habit_checkins()`, `batch_habit_checkins()`
 - focus/productivity stats: `productivity_stats()`, `focus_heatmap()`, `focus_distribution()`, `focus_timeline()`
-- query/read layer: `DidaV2QueryService.workspace_map()`, `query_tasks()`, timezone-aware `query_agenda()`, `priority_dashboard()`, and `query_saved_filter()`
+- query/read layer: `DidaV2QueryService.workspace_map()`, `query_tasks()`, timezone-aware `query_agenda()`, `priority_dashboard()`, and `query_saved_filter()`; a saved-filter operation binds its snapshot, preference lookup, and profile fallback to one captured identity, with timezone order explicit option → account Web preference → profile fallback (`Asia/Shanghai` for Dida, `UTC` for TickTick)
 - verified action layer: `DidaV2Verifier.verified_move_task()`, `verified_set_task_parent()`, `verified_unset_task_parent()`, `verified_set_project_folder()`
 - CLI dry-run/apply for write operations; read-only commands for history, trash, stats, sync-backed lists, and query views
 
-Saved-filter evaluation currently supports nested boolean groups, `priority`, and relative `dueDate`/`startDate` values (`today`, `tomorrow`, `yesterday`, `thisWeek`, `nextWeek`, `overdue`). Unknown conditions fail closed with `UnsupportedFilterCondition`; the client does not guess private write endpoints for filter CRUD.
+Saved-filter evaluation currently supports nested boolean groups, strict Dida priority values (`0`, `1`, `3`, `5`), and relative `dueDate`/`startDate` values (`today`, `tomorrow`, `yesterday`, `thisWeek`, `nextWeek`, `overdue`). The complete AST is validated before explanation or task matching—even for an empty task collection—so mixed node shapes, unknown conditions, empty groups/value lists, malformed priorities, and unknown relative-date keywords fail closed. The CLI resolves the account/profile timezone before attaching a zone to naive `--now` values and converts normal filter/date/timezone validation errors into concise `ERROR:` output with exit code 2. The client does not guess private write endpoints for filter CRUD.
+
+Python 3.9 is exercised with functional compact-offset (`+0000`/`+0800`) and saved-filter tests, not only an import smoke test.
 
 See `docs/v2-capability-matrix.md` for migration status and remaining v2-first work.
 

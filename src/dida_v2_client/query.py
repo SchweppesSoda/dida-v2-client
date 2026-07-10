@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from .datetime_utils import parse_dida_datetime
 from .filters import FilterContext, SavedFilterEvaluator
-from .snapshot import SyncSnapshot
+from .snapshot import SyncSnapshot, thaw_snapshot_value
 from .transport import DidaV2Error
 
 
@@ -247,32 +247,64 @@ class DidaV2QueryService:
             "counts": {key: len(value) for key, value in buckets.items()},
         }
 
+    def resolve_timezone(
+        self,
+        explicit: str | None = None,
+        *,
+        _identity: tuple[Any, str | None] | None = None,
+    ) -> str:
+        if explicit:
+            return explicit
+        get_preferences = getattr(self.client, "user_preferences", None)
+        if callable(get_preferences):
+            preferences = get_preferences(_identity=_identity) if _identity is not None else get_preferences()
+            if isinstance(preferences, dict):
+                timezone_name = preferences.get("timeZone") or preferences.get("timezone")
+                if isinstance(timezone_name, str) and timezone_name.strip():
+                    return timezone_name.strip()
+        config = _identity[0] if _identity is not None else getattr(self.client, "config", None)
+        return "Asia/Shanghai" if getattr(config, "profile", "dida") == "dida" else "UTC"
+
     def query_saved_filter(
         self,
         name_or_id: str,
         *,
-        now: datetime | None = None,
+        now: datetime | str | None = None,
         timezone: str | None = None,
     ) -> dict[str, Any]:
-        get_snapshot = getattr(self.client, "get_snapshot", None)
-        if not callable(get_snapshot):
-            raise DidaV2Error("Saved-filter queries require a client with get_snapshot()")
-        snapshot = get_snapshot()
+        get_snapshot_with_identity = getattr(self.client, "_get_snapshot_with_identity", None)
+        if callable(get_snapshot_with_identity):
+            operation: Any = get_snapshot_with_identity()
+            snapshot, identity = operation
+        else:
+            get_snapshot = getattr(self.client, "get_snapshot", None)
+            if not callable(get_snapshot):
+                raise DidaV2Error("Saved-filter queries require a client with get_snapshot()")
+            snapshot = get_snapshot()
+            identity = None
         if not isinstance(snapshot, SyncSnapshot):
             raise DidaV2Error("get_snapshot() returned an unsupported snapshot type")
-        filters = [dict(item) for item in snapshot.filters]
+        filters = [thaw_snapshot_value(item) for item in snapshot.filters]
         matches = [item for item in filters if item.get("id") == name_or_id or item.get("name") == name_or_id]
         if not matches:
             raise DidaV2Error(f"Saved filter not found: {name_or_id}")
         if len(matches) > 1:
             raise DidaV2Error(f"Saved filter is ambiguous: {name_or_id}")
         saved_filter = matches[0]
-        timezone_name = timezone or "Asia/Shanghai"
-        evaluated_at = now or datetime.now(ZoneInfo(timezone_name))
+        timezone_name = self.resolve_timezone(timezone, _identity=identity)
+        zone = ZoneInfo(timezone_name)
+        if now is None:
+            evaluated_at = datetime.now(zone)
+        elif isinstance(now, str):
+            evaluated_at = parse_dida_datetime(now, assume_timezone=timezone_name).astimezone(zone)
+        elif now.tzinfo is None:
+            evaluated_at = now.replace(tzinfo=zone)
+        else:
+            evaluated_at = now.astimezone(zone)
         evaluator = SavedFilterEvaluator()
         parsed = evaluator.parse(saved_filter.get("rule") or {})
-        projects = [dict(item) for item in snapshot.projects]
-        folders = [dict(item) for item in snapshot.project_groups]
+        projects = [thaw_snapshot_value(item) for item in snapshot.projects]
+        folders = [thaw_snapshot_value(item) for item in snapshot.project_groups]
         project_by_id: dict[str, dict[str, Any]] = {}
         folder_by_id: dict[str, dict[str, Any]] = {}
         for item in projects:
@@ -289,7 +321,7 @@ class DidaV2QueryService:
             project_by_id=project_by_id,
             folder_by_id=folder_by_id,
         )
-        items = evaluator.filter_tasks([dict(item) for item in snapshot.tasks], parsed, context)
+        items = evaluator.filter_tasks([thaw_snapshot_value(item) for item in snapshot.tasks], parsed, context)
         enriched: list[dict[str, Any]] = []
         for task in items:
             row = dict(task)

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from threading import RLock
+from typing import Any, Callable
 
 from .config import DidaConfig
-from .snapshot import SyncSnapshot
+from .snapshot import SyncSnapshot, thaw_snapshot_value
+from .version import USER_AGENT
 
 
 class DidaV2Error(RuntimeError):
@@ -15,20 +19,90 @@ class DidaV2Error(RuntimeError):
 
 
 class DidaV2Client:
-    def __init__(self, config: DidaConfig | None = None, session_token: str | None = None):
-        self.config = config or DidaConfig.default()
-        self.session_token = session_token
+    def __init__(
+        self,
+        config: DidaConfig | None = None,
+        session_token: str | None = None,
+        *,
+        clock: Callable[[], float] | None = None,
+        snapshot_ttl_seconds: float = 30.0,
+    ):
+        self._snapshot_lock = RLock()
         self._snapshot_cache: SyncSnapshot | None = None
+        self._snapshot_cached_at: float | None = None
+        self._snapshot_identity: tuple[DidaConfig, str | None] | None = None
+        self._snapshot_generation = 0
+        self._snapshot_fetch_sequence = 0
+        self._config = config or DidaConfig.default()
+        self._session_token = session_token
+        self._clock = clock or time.monotonic
+        self._snapshot_ttl_seconds = 30.0
+        self.snapshot_ttl_seconds = snapshot_ttl_seconds
 
-    def _headers(self) -> dict[str, str]:
-        if not self.session_token:
+    def _current_snapshot_identity(self) -> tuple[DidaConfig, str | None]:
+        return (self._config, self._session_token)
+
+    def _invalidate_snapshot_locked(self) -> None:
+        self._snapshot_cache = None
+        self._snapshot_cached_at = None
+        self._snapshot_identity = None
+        self._snapshot_generation += 1
+
+    def _invalidate_snapshot(self) -> None:
+        with self._snapshot_lock:
+            self._invalidate_snapshot_locked()
+
+    @property
+    def config(self) -> DidaConfig:
+        with self._snapshot_lock:
+            return self._config
+
+    @config.setter
+    def config(self, value: DidaConfig) -> None:
+        raise AttributeError("config is read-only; use set_identity(config, session_token)")
+
+    @property
+    def session_token(self) -> str | None:
+        with self._snapshot_lock:
+            return self._session_token
+
+    @session_token.setter
+    def session_token(self, value: str | None) -> None:
+        raise AttributeError("session_token is read-only; use set_identity(config, session_token)")
+
+    def set_identity(self, config: DidaConfig, session_token: str | None) -> None:
+        with self._snapshot_lock:
+            if (config, session_token) != self._current_snapshot_identity():
+                self._config = config
+                self._session_token = session_token
+                self._invalidate_snapshot_locked()
+
+    @property
+    def snapshot_ttl_seconds(self) -> float:
+        with self._snapshot_lock:
+            return self._snapshot_ttl_seconds
+
+    @snapshot_ttl_seconds.setter
+    def snapshot_ttl_seconds(self, value: float) -> None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("snapshot_ttl_seconds must be between 0 and 30")
+        ttl = float(value)
+        if not math.isfinite(ttl) or not 0 <= ttl <= 30:
+            raise ValueError("snapshot_ttl_seconds must be between 0 and 30")
+        with self._snapshot_lock:
+            if ttl != self._snapshot_ttl_seconds:
+                self._snapshot_ttl_seconds = ttl
+                self._invalidate_snapshot_locked()
+
+    def _headers(self, config: DidaConfig, session_token: str | None) -> dict[str, str]:
+        if not session_token:
             raise DidaV2Error("Missing v2 session token. Use headless login or fallback DIDA_SESSION_TOKEN/TICKTICK_SESSION_TOKEN.")
         return {
-            "Cookie": f"{self.config.cookie_name}={self.session_token}",
+            "Cookie": f"{config.cookie_name}={session_token}",
             "Content-Type": "application/json",
-            "User-Agent": "dida-v2-client/0.1",
-            "Origin": self.config.web_origin,
-            "Referer": f"{self.config.web_origin}/",
+            "User-Agent": USER_AGENT,
+            "Origin": config.web_origin,
+            "Referer": f"{config.web_origin}/",
             "X-Device": json.dumps(
                 {
                     "platform": "web",
@@ -45,37 +119,90 @@ class DidaV2Client:
             ),
         }
 
-    def request(self, method: str, endpoint: str, *, params: dict[str, Any] | None = None, payload: Any = None) -> Any:
-        url = f"{self.config.api_v2_base.rstrip('/')}/{endpoint.lstrip('/')}"
+    def request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: Any = None,
+        _identity: tuple[DidaConfig, str | None] | None = None,
+    ) -> Any:
+        method_upper = method.upper()
+        with self._snapshot_lock:
+            config, session_token = _identity or self._current_snapshot_identity()
+            if method_upper != "GET":
+                self._invalidate_snapshot_locked()
+        url = f"{config.api_v2_base.rstrip('/')}/{endpoint.lstrip('/')}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
         data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=self._headers(), method=method.upper())
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers=self._headers(config, session_token),
+            method=method_upper,
+        )
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read().decode("utf-8", "replace")
-                result = {} if not raw else json.loads(raw)
-                if method.upper() != "GET":
-                    self._snapshot_cache = None
-                return result
+                return {} if not raw else json.loads(raw)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
-            raise DidaV2Error(f"HTTP {exc.code} from {method.upper()} {endpoint}: {body[:300]}") from exc
+            raise DidaV2Error(f"HTTP {exc.code} from {method_upper} {endpoint}: {body[:300]}") from exc
+        finally:
+            if method_upper != "GET":
+                self._invalidate_snapshot()
 
     def user_status(self) -> Any:
         return self.request("GET", "/user/status")
 
-    def full_sync(self) -> Any:
-        return self.request("GET", "/batch/check/0")
+    def full_sync(self, *, _identity: tuple[DidaConfig, str | None] | None = None) -> Any:
+        return self.request("GET", "/batch/check/0", _identity=_identity)
+
+    def _get_snapshot_with_identity(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> tuple[SyncSnapshot, tuple[DidaConfig, str | None]]:
+        with self._snapshot_lock:
+            now = self._clock()
+            identity = self._current_snapshot_identity()
+            expired = (
+                self._snapshot_cached_at is not None
+                and now - self._snapshot_cached_at >= self.snapshot_ttl_seconds
+            )
+            if (
+                not refresh
+                and not expired
+                and self._snapshot_cache is not None
+                and self._snapshot_identity == identity
+            ):
+                return self._snapshot_cache, identity
+            generation = self._snapshot_generation
+            self._snapshot_fetch_sequence += 1
+            fetch_sequence = self._snapshot_fetch_sequence
+
+        snapshot = SyncSnapshot.from_payload(self.full_sync(_identity=identity))
+
+        with self._snapshot_lock:
+            if (
+                generation == self._snapshot_generation
+                and fetch_sequence == self._snapshot_fetch_sequence
+                and identity == self._current_snapshot_identity()
+            ):
+                self._snapshot_cache = snapshot
+                self._snapshot_cached_at = self._clock()
+                self._snapshot_identity = identity
+        return snapshot, identity
 
     def get_snapshot(self, *, refresh: bool = False) -> SyncSnapshot:
-        if refresh or self._snapshot_cache is None:
-            self._snapshot_cache = SyncSnapshot.from_payload(self.full_sync())
-        return self._snapshot_cache
+        snapshot, _identity = self._get_snapshot_with_identity(refresh=refresh)
+        return snapshot
 
     def list_filters(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
-        return [dict(item) for item in current.filters]
+        return [thaw_snapshot_value(item) for item in current.filters]
 
     def get_filter(self, filter_id: str, *, snapshot: SyncSnapshot | None = None) -> dict[str, Any]:
         matches = [item for item in self.list_filters(snapshot=snapshot) if item.get("id") == filter_id]
@@ -91,7 +218,7 @@ class DidaV2Client:
 
     def list_tasks(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
-        return [dict(task) for task in current.tasks]
+        return [thaw_snapshot_value(task) for task in current.tasks]
 
     def get_task(self, task_id: str, *, project_id: str | None = None) -> dict[str, Any]:
         for task in self.list_tasks():
@@ -136,10 +263,22 @@ class DidaV2Client:
         return errors
 
     def ensure_batch_ok(self, response: Any) -> Any:
-        errors = self.batch_errors(response)
-        if errors:
+        if not isinstance(response, dict) or not response:
+            raise DidaV2Error("V2 batch returned an unrecognized response shape")
+        fields = set(response)
+        success_fields = {"id2etag", "id2error"}
+        error_fields = {"errorId", "errorCode", "error"}
+        if fields <= success_fields:
+            if not all(isinstance(response[field], dict) for field in fields):
+                raise DidaV2Error("V2 batch returned an unrecognized response shape")
+            errors = self.batch_errors(response)
+            if errors:
+                raise DidaV2Error(f"V2 batch response contains errors: {json.dumps(errors, ensure_ascii=False)}")
+            return response
+        if fields <= error_fields and all(isinstance(response[field], str) and response[field] for field in fields):
+            errors = {field: response[field] for field in fields}
             raise DidaV2Error(f"V2 batch response contains errors: {json.dumps(errors, ensure_ascii=False)}")
-        return response
+        raise DidaV2Error("V2 batch returned an unrecognized response shape")
 
     def create_task(self, task: dict[str, Any]) -> Any:
         return self.ensure_batch_ok(self.batch_tasks(add=[task]))
@@ -176,7 +315,7 @@ class DidaV2Client:
 
     def list_tags(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
-        return [dict(tag) for tag in current.tags]
+        return [thaw_snapshot_value(tag) for tag in current.tags]
 
     def batch_tags(self, *, add: list[dict[str, Any]] | None = None, update: list[dict[str, Any]] | None = None) -> Any:
         return self.request("POST", "/batch/tag", payload={"add": add or [], "update": update or []})
@@ -256,7 +395,7 @@ class DidaV2Client:
 
     def list_project_folders(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
-        return [dict(folder) for folder in current.project_groups]
+        return [thaw_snapshot_value(folder) for folder in current.project_groups]
 
     def batch_project_folders(
         self,
@@ -290,7 +429,7 @@ class DidaV2Client:
 
     def list_projects(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
-        return [dict(project) for project in current.projects]
+        return [thaw_snapshot_value(project) for project in current.projects]
 
     def batch_projects(self, *, update: list[dict[str, Any]]) -> Any:
         return self.request("POST", "/batch/project", payload={"update": update})
@@ -353,8 +492,17 @@ class DidaV2Client:
         data = self.request("GET", "/user/profile")
         return data if isinstance(data, dict) else {}
 
-    def user_preferences(self) -> dict[str, Any]:
-        data = self.request("GET", "/user/preferences/settings", params={"includeWeb": "true"})
+    def user_preferences(
+        self,
+        *,
+        _identity: tuple[DidaConfig, str | None] | None = None,
+    ) -> dict[str, Any]:
+        data = self.request(
+            "GET",
+            "/user/preferences/settings",
+            params={"includeWeb": "true"},
+            _identity=_identity,
+        )
         return data if isinstance(data, dict) else {}
 
     def productivity_stats(self) -> dict[str, Any]:

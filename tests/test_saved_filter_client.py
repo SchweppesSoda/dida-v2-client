@@ -7,7 +7,7 @@ from dida_v2_client.transport import DidaV2Client, DidaV2Error
 def fixture_client(load_fixture):
     client = DidaV2Client(DidaConfig.default(), session_token="TEST")
     payload = load_fixture("full_sync_with_filters.json")
-    client.full_sync = lambda: payload
+    client.full_sync = lambda **_: payload
     return client
 
 
