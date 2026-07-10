@@ -1,11 +1,10 @@
-import json
 from threading import Event, Thread
 
 import pytest
 
 from dida_v2_client.config import DidaConfig
 from dida_v2_client.snapshot import SyncSnapshot
-from dida_v2_client.transport import DidaV2Client
+from dida_v2_client.transport import DidaV2Client, DidaV2Error
 
 
 def test_snapshot_extracts_sync_collections(load_fixture):
@@ -290,7 +289,7 @@ def test_malformed_successful_write_response_still_invalidates_snapshot(monkeypa
     client.full_sync = fake_sync
     assert client.get_snapshot().checkpoint == 1
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(DidaV2Error, match="Malformed JSON response"):
         client.update_task({"id": "task-1", "projectId": "project-1"})
 
     assert client.get_snapshot().checkpoint == 2

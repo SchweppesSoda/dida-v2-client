@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.utils import parsedate_to_datetime
 from threading import RLock
 from typing import Any, Callable
 
@@ -38,6 +40,10 @@ class DidaV2HTTPError(DidaV2Error):
 
 
 class DidaV2Client:
+    _SAFE_READ_METHODS = frozenset({"GET", "HEAD"})
+    _RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+    _MAX_RETRY_DELAY_SECONDS = 30.0
+
     def __init__(
         self,
         config: DidaConfig | None = None,
@@ -45,6 +51,11 @@ class DidaV2Client:
         *,
         clock: Callable[[], float] | None = None,
         snapshot_ttl_seconds: float = 30.0,
+        max_read_attempts: int = 3,
+        retry_backoff_seconds: float = 0.5,
+        sleep: Callable[[float], None] | None = None,
+        jitter: Callable[[float], float] | None = None,
+        wall_clock: Callable[[], float] | None = None,
     ):
         self._snapshot_lock = RLock()
         self._snapshot_cache: SyncSnapshot | None = None
@@ -57,6 +68,13 @@ class DidaV2Client:
         self._clock = clock or time.monotonic
         self._snapshot_ttl_seconds = 30.0
         self.snapshot_ttl_seconds = snapshot_ttl_seconds
+        self._max_read_attempts = 3
+        self._retry_backoff_seconds = 0.5
+        self.max_read_attempts = max_read_attempts
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self._sleep = sleep or time.sleep
+        self._jitter = jitter or (lambda delay: random.uniform(0.0, delay))
+        self._wall_clock = wall_clock or time.time
 
     def _current_snapshot_identity(self) -> tuple[DidaConfig, str | None]:
         return (self._config, self._session_token)
@@ -95,6 +113,31 @@ class DidaV2Client:
                 self._config = config
                 self._session_token = session_token
                 self._invalidate_snapshot_locked()
+
+    @property
+    def max_read_attempts(self) -> int:
+        return self._max_read_attempts
+
+    @max_read_attempts.setter
+    def max_read_attempts(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5:
+            raise ValueError("max_read_attempts must be an integer between 1 and 5")
+        self._max_read_attempts = value
+
+    @property
+    def retry_backoff_seconds(self) -> float:
+        return self._retry_backoff_seconds
+
+    @retry_backoff_seconds.setter
+    def retry_backoff_seconds(self, value: float) -> None:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0 <= float(value) <= self._MAX_RETRY_DELAY_SECONDS
+        ):
+            raise ValueError("retry_backoff_seconds must be between 0 and 30")
+        self._retry_backoff_seconds = float(value)
 
     @property
     def snapshot_ttl_seconds(self) -> float:
@@ -138,6 +181,64 @@ class DidaV2Client:
             ),
         }
 
+    def _retry_after_seconds(self, exc: urllib.error.HTTPError) -> float | None:
+        headers = getattr(exc, "headers", None)
+        value = headers.get("Retry-After") if headers is not None else None
+        if not value:
+            return None
+        text = str(value).strip()
+        try:
+            seconds = float(text)
+        except ValueError:
+            try:
+                target = parsedate_to_datetime(text)
+                if target.tzinfo is None:
+                    return None
+                seconds = target.timestamp() - self._wall_clock()
+            except (TypeError, ValueError, OverflowError):
+                return None
+        if not math.isfinite(seconds) or seconds < 0:
+            return None
+        return min(seconds, self._MAX_RETRY_DELAY_SECONDS)
+
+    def _retry_delay(self, retry_index: int, exc: urllib.error.HTTPError | None = None) -> float:
+        if exc is not None:
+            retry_after = self._retry_after_seconds(exc)
+            if retry_after is not None:
+                return retry_after
+        base = min(self.retry_backoff_seconds * (2**retry_index), self._MAX_RETRY_DELAY_SECONDS)
+        try:
+            delay = float(self._jitter(base))
+        except Exception:
+            delay = base
+        if not math.isfinite(delay) or delay < 0:
+            delay = base
+        return min(delay, self._MAX_RETRY_DELAY_SECONDS)
+
+    @staticmethod
+    def _structured_http_error(
+        exc: urllib.error.HTTPError,
+        method: str,
+        endpoint: str,
+    ) -> DidaV2HTTPError:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        error_code = None
+        try:
+            parsed = json.loads(body) if body else {}
+            if isinstance(parsed, dict):
+                for key in ("errorCode", "errorId", "error"):
+                    value = parsed.get(key)
+                    if isinstance(value, str) and value:
+                        error_code = value
+                        break
+        except (json.JSONDecodeError, UnicodeError):
+            pass
+        return DidaV2HTTPError(exc.code, method, endpoint, error_code=error_code)
+
     def request(
         self,
         method: str,
@@ -148,9 +249,10 @@ class DidaV2Client:
         _identity: tuple[DidaConfig, str | None] | None = None,
     ) -> Any:
         method_upper = method.upper()
+        safe_read = method_upper in self._SAFE_READ_METHODS
         with self._snapshot_lock:
             config, session_token = _identity or self._current_snapshot_identity()
-            if method_upper != "GET":
+            if not safe_read:
                 self._invalidate_snapshot_locked()
         url = f"{config.api_v2_base.rstrip('/')}/{endpoint.lstrip('/')}"
         if params:
@@ -162,32 +264,32 @@ class DidaV2Client:
             headers=self._headers(config, session_token),
             method=method_upper,
         )
+        attempts = self.max_read_attempts if safe_read else 1
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-                return {} if not raw else json.loads(raw)
-        except urllib.error.HTTPError as exc:
-            body = ""
-            try:
-                body = exc.read().decode("utf-8", "replace")
-            except Exception:
-                pass
-            error_code = None
-            try:
-                parsed = json.loads(body) if body else {}
-                if isinstance(parsed, dict):
-                    for key in ("errorCode", "errorId", "error"):
-                        value = parsed.get(key)
-                        if isinstance(value, str) and value:
-                            error_code = value
-                            break
-            except (json.JSONDecodeError, UnicodeError):
-                pass
-            raise DidaV2HTTPError(exc.code, method_upper, endpoint, error_code=error_code) from None
-        except (urllib.error.URLError, OSError):
-            raise DidaV2Error(f"Network request failed for {method_upper} {endpoint}") from None
+            for attempt in range(attempts):
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        raw = resp.read().decode("utf-8", "replace")
+                    if not raw:
+                        return {}
+                    try:
+                        return json.loads(raw)
+                    except json.JSONDecodeError:
+                        raise DidaV2Error(f"Malformed JSON response from {method_upper} {endpoint}") from None
+                except urllib.error.HTTPError as exc:
+                    retryable = exc.code in self._RETRYABLE_HTTP_STATUSES and attempt + 1 < attempts
+                    if retryable:
+                        self._sleep(self._retry_delay(attempt, exc))
+                        continue
+                    raise self._structured_http_error(exc, method_upper, endpoint) from None
+                except (urllib.error.URLError, OSError):
+                    if attempt + 1 < attempts:
+                        self._sleep(self._retry_delay(attempt))
+                        continue
+                    raise DidaV2Error(f"Network request failed for {method_upper} {endpoint}") from None
+            raise AssertionError("unreachable retry loop")
         finally:
-            if method_upper != "GET":
+            if not safe_read:
                 self._invalidate_snapshot()
 
     def user_status(self) -> Any:
