@@ -1,6 +1,7 @@
 import json
 
 from dida_v2_client import cli
+from dida_v2_client.transport import DidaV2Error
 
 
 class FakeClient:
@@ -12,6 +13,9 @@ class FakeClient:
 
     def batch_tasks(self, **kwargs):
         return {"batched": kwargs}
+
+    def ensure_batch_ok(self, response):
+        return response
 
     def move_task(self, task_id, *, from_project_id, to_project_id):
         return {"moved": {"task_id": task_id, "from_project_id": from_project_id, "to_project_id": to_project_id}}
@@ -60,6 +64,20 @@ def test_tasks_batch_apply(monkeypatch, capsys):
     assert cli.main(["tasks", "batch", "--update-json", '[{"id":"t1"}]', "--apply"]) == 0
 
     assert json.loads(capsys.readouterr().out) == {"batched": {"add": [], "update": [{"id": "t1"}], "delete": []}}
+
+
+def test_tasks_batch_apply_rejects_malformed_response(monkeypatch, capsys):
+    class MalformedClient(FakeClient):
+        def batch_tasks(self, **kwargs):
+            return {"unexpected": True}
+
+        def ensure_batch_ok(self, response):
+            raise DidaV2Error("V2 batch returned an unrecognized response shape")
+
+    monkeypatch.setattr(cli, "client_from_args", lambda args: MalformedClient())
+
+    assert cli.main(["tasks", "batch", "--update-json", '[{"id":"t1"}]', "--apply"]) == 2
+    assert "unrecognized response shape" in capsys.readouterr().err
 
 
 def test_tasks_move_dry_run(monkeypatch, capsys):

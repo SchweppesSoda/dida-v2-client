@@ -1,0 +1,27 @@
+{
+  "checkPoint": 100,
+  "checks": [],
+  "filters": [],
+  "inboxId": "project-inbox",
+  "projectGroups": [],
+  "projectProfiles": [
+    {
+      "id": "project-inbox",
+      "name": "Inbox",
+      "kind": "TASK",
+      "closed": false
+    }
+  ],
+  "syncTaskBean": {
+    "update": [
+      {
+        "id": "task-1",
+        "projectId": "project-inbox",
+        "title": "Example",
+        "priority": 0,
+        "status": 0
+      }
+    ]
+  },
+  "tags": []
+}

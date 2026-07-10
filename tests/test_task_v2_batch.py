@@ -80,12 +80,15 @@ def test_move_task_posts_v2_task_project_batch(monkeypatch):
     def fake_urlopen(req, timeout):
         seen["url"] = req.full_url
         seen["body"] = json.loads(req.data.decode("utf-8"))
-        return FakeResponse(b'{"ok":true}')
+        return FakeResponse(b'{"id2etag":{"t1":"etag"},"id2error":{}}')
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     client = DidaV2Client(DidaConfig.default(), session_token="SECRET")
 
-    assert client.move_task("t1", from_project_id="p1", to_project_id="p2") == {"ok": True}
+    assert client.move_task("t1", from_project_id="p1", to_project_id="p2") == {
+        "id2etag": {"t1": "etag"},
+        "id2error": {},
+    }
     assert urlparse(seen["url"]).path == "/api/v2/batch/taskProject"
     assert seen["body"] == [{"taskId": "t1", "fromProjectId": "p1", "toProjectId": "p2"}]
 
@@ -95,13 +98,14 @@ def test_set_and_unset_task_parent_use_v2_task_parent_batch(monkeypatch):
 
     def fake_urlopen(req, timeout):
         bodies.append(json.loads(req.data.decode("utf-8")))
-        return FakeResponse(b'{"ok":true}')
+        return FakeResponse(b'{"id2etag":{"t1":"etag"},"id2error":{}}')
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     client = DidaV2Client(DidaConfig.default(), session_token="SECRET")
 
-    assert client.set_task_parent("child", project_id="p1", parent_id="parent") == {"ok": True}
-    assert client.unset_task_parent("child", project_id="p1", old_parent_id="parent") == {"ok": True}
+    expected = {"id2etag": {"t1": "etag"}, "id2error": {}}
+    assert client.set_task_parent("child", project_id="p1", parent_id="parent") == expected
+    assert client.unset_task_parent("child", project_id="p1", old_parent_id="parent") == expected
     assert bodies == [
         [{"taskId": "child", "projectId": "p1", "parentId": "parent"}],
         [{"taskId": "child", "projectId": "p1", "oldParentId": "parent"}],

@@ -24,6 +24,14 @@ class FakeVerifier:
     def __init__(self, client):
         self.client = client
 
+    def validate_task_changes(self, changes):
+        if not changes:
+            raise ValueError("changes required")
+        return dict(changes)
+
+    def verified_update_task(self, task_id, *, project_id, changes):
+        return {"verified_update": {"task_id": task_id, "project_id": project_id, "changes": changes}}
+
     def verified_move_task(self, task_id, *, from_project_id, to_project_id):
         return {"verified_move": {"task_id": task_id, "from": from_project_id, "to": to_project_id}}
 
@@ -52,15 +60,96 @@ def test_query_cli_agenda_and_priority(monkeypatch, capsys):
     monkeypatch.setattr(cli, "client_from_args", lambda args: object())
     monkeypatch.setattr(cli, "DidaV2QueryService", FakeQueryService)
 
-    assert cli.main(["query", "agenda", "2026-07-09", "2026-07-10", "--date-field", "scheduled"]) == 0
+    assert cli.main(
+        [
+            "query",
+            "agenda",
+            "2026-07-09",
+            "2026-07-10",
+            "--date-field",
+            "scheduled",
+            "--timezone",
+            "Asia/Shanghai",
+        ]
+    ) == 0
     assert json.loads(capsys.readouterr().out)["agenda"] == {
         "from": "2026-07-09",
         "to": "2026-07-10",
         "date_field": "scheduled",
+        "timezone": "Asia/Shanghai",
     }
 
     assert cli.main(["query", "priority-dashboard", "--limit", "10"]) == 0
     assert json.loads(capsys.readouterr().out) == {"priority": {"limit": 10}}
+
+
+def test_verified_update_cli_is_dry_run_by_default_and_applies_explicitly(monkeypatch, capsys):
+    client_calls = 0
+
+    def fake_client_from_args(args):
+        nonlocal client_calls
+        client_calls += 1
+        return object()
+
+    monkeypatch.setattr(cli, "client_from_args", fake_client_from_args)
+    monkeypatch.setattr(cli, "DidaV2Verifier", FakeVerifier)
+    argv = [
+        "verified",
+        "update",
+        "t1",
+        "--project-id",
+        "p1",
+        "--title",
+        "Updated",
+        "--priority",
+        "5",
+        "--status",
+        "0",
+        "--tag",
+        "work",
+        "--due-date",
+        "2026-07-11T09:00:00+0800",
+        "--not-all-day",
+    ]
+
+    assert cli.main(argv) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["dry_run"] is True
+    assert dry_run["would_verified_update"]["changes"]["allDay"] is False
+    assert client_calls == 0
+
+    assert cli.main([*argv, "--apply"]) == 0
+    assert client_calls == 1
+    applied = json.loads(capsys.readouterr().out)["verified_update"]
+    assert applied == {
+        "task_id": "t1",
+        "project_id": "p1",
+        "changes": {
+            "title": "Updated",
+            "priority": 5,
+            "status": 0,
+            "tags": ["work"],
+            "dueDate": "2026-07-11T09:00:00+0800",
+            "allDay": False,
+        },
+    }
+
+
+def test_verified_update_cli_rejects_invalid_changes_before_client_creation(monkeypatch, capsys):
+    client_calls = 0
+
+    def unexpected_client(args):
+        nonlocal client_calls
+        client_calls += 1
+        raise AssertionError("client/auth must not be constructed")
+
+    monkeypatch.setattr(cli, "client_from_args", unexpected_client)
+
+    assert cli.main(["verified", "update", "t1", "--project-id", "p1", "--priority", "2"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("ERROR:")
+    assert client_calls == 0
 
 
 def test_verified_cli_uses_verifier(monkeypatch, capsys):

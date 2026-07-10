@@ -4,21 +4,44 @@ import argparse
 import json
 import sys
 from typing import Any
+from zoneinfo import ZoneInfoNotFoundError
 
-from .auth import resolve_session_token
+from .auth import DidaAuthError, KeyringSessionStore, SessionStore, direct_signon_login, resolve_session_token
 from .config import DidaConfig
+from .filters import SavedFilterEvaluator
 from .query import DidaV2QueryService
-from .transport import DidaV2Client, DidaV2Error
+from .transport import DidaV2Client, DidaV2Error, DidaV2HTTPError
 from .verify import DidaV2Verifier
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dida-v2")
-    parser.add_argument("--profile", choices=["dida", "ticktick", "cn", "global"], default="dida")
-    parser.add_argument("--no-headless", action="store_true", help="Skip headless login and use session-token env fallback only")
+    parser.add_argument("--profile", choices=DidaConfig.PROFILE_ALIASES, default="dida")
+    parser.add_argument(
+        "--no-headless",
+        action="store_true",
+        help="Skip direct/Selenium login; use secure-store or profile-specific session env only",
+    )
     sub = parser.add_subparsers(dest="resource", required=True)
 
     sub.add_parser("status")
+
+    auth = sub.add_parser("auth")
+    auth_sub = auth.add_subparsers(dest="action", required=True)
+    for action in ("login", "status", "refresh", "logout"):
+        auth_sub.add_parser(action)
+
+    saved_filters = sub.add_parser("filters")
+    saved_filter_sub = saved_filters.add_subparsers(dest="action", required=True)
+    saved_filter_sub.add_parser("list")
+    for action in ("get", "explain", "run"):
+        command = saved_filter_sub.add_parser(action)
+        selector = command.add_mutually_exclusive_group(required=True)
+        selector.add_argument("--id", dest="filter_id")
+        selector.add_argument("--name", dest="filter_name")
+        if action == "run":
+            command.add_argument("--timezone")
+            command.add_argument("--now")
 
     tags = sub.add_parser("tags")
     tag_sub = tags.add_subparsers(dest="action", required=True)
@@ -224,6 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     agenda.add_argument("from_dt")
     agenda.add_argument("to_dt")
     agenda.add_argument("--date-field", choices=["scheduled", "due", "start"], default="scheduled")
+    agenda.add_argument("--timezone")
     agenda.add_argument("--tag", action="append", dest="tags")
     agenda.add_argument("--text", dest="text_query")
     agenda.add_argument("--limit", type=int, default=50)
@@ -232,6 +256,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     verified = sub.add_parser("verified")
     verified_sub = verified.add_subparsers(dest="action", required=True)
+    v_update = verified_sub.add_parser("update")
+    v_update.add_argument("task_id")
+    v_update.add_argument("--project-id", required=True)
+    v_update.add_argument("--title")
+    v_update.add_argument("--content")
+    v_update.add_argument("--desc")
+    v_update.add_argument("--priority", type=int)
+    v_update.add_argument("--status", type=int, choices=[-1, 0, 2])
+    v_update.add_argument("--tag", action="append", dest="tags")
+    v_update.add_argument("--due-date")
+    v_update.add_argument("--start-date")
+    v_update.add_argument("--time-zone")
+    v_update.add_argument("--column-id")
+    all_day = v_update.add_mutually_exclusive_group()
+    all_day.add_argument("--all-day", dest="all_day", action="store_true")
+    all_day.add_argument("--not-all-day", dest="all_day", action="store_false")
+    v_update.set_defaults(all_day=None)
+    v_update.add_argument("--apply", action="store_true")
     v_move = verified_sub.add_parser("move")
     v_move.add_argument("task_id")
     v_move.add_argument("--from-project", required=True)
@@ -254,9 +296,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def session_store_from_args(args: argparse.Namespace, *, required: bool = False) -> SessionStore | None:
+    try:
+        return KeyringSessionStore()
+    except DidaAuthError:
+        if required:
+            raise
+        return None
+
+
 def client_from_args(args: argparse.Namespace) -> DidaV2Client:
     cfg = DidaConfig.for_profile(args.profile)
-    token = resolve_session_token(profile=args.profile, headless=not args.no_headless)
+    store = session_store_from_args(args, required=False)
+    token = resolve_session_token(
+        profile=args.profile,
+        headless=not args.no_headless,
+        session_store=store,
+    )
     return DidaV2Client(cfg, session_token=token)
 
 
@@ -266,7 +322,10 @@ def _json_list_arg(value: str | None) -> list[Any]:
     if value.startswith("@"):
         with open(value[1:], "r", encoding="utf-8") as handle:
             value = handle.read()
-    parsed = json.loads(value)
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, RecursionError):
+        raise DidaV2Error("JSON argument is not valid JSON") from None
     if not isinstance(parsed, list):
         raise DidaV2Error("JSON argument must be a list")
     return parsed
@@ -299,6 +358,28 @@ def _task_payload_from_args(args: argparse.Namespace, *, include_id: bool = Fals
     if getattr(args, "items_json", None):
         payload["items"] = _json_list_arg(args.items_json)
     return payload
+
+
+def _verified_task_changes_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    field_map = {
+        "title": "title",
+        "content": "content",
+        "desc": "desc",
+        "priority": "priority",
+        "status": "status",
+        "due_date": "dueDate",
+        "start_date": "startDate",
+        "time_zone": "timeZone",
+        "column_id": "columnId",
+        "all_day": "allDay",
+        "tags": "tags",
+    }
+    changes = {
+        api_key: value
+        for attr, api_key in field_map.items()
+        if (value := getattr(args, attr, None)) is not None
+    }
+    return changes
 
 
 def _query_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
@@ -334,11 +415,102 @@ def _noneish(value: str) -> str | None:
     return None if value.lower() in {"none", "null", "-"} else value
 
 
+def _run_auth(args: argparse.Namespace) -> int:
+    config = DidaConfig.for_profile(args.profile)
+    profile = config.profile
+    store = session_store_from_args(args, required=True)
+    if store is None:  # pragma: no cover - required=True raises first
+        raise DidaAuthError("OS secure session storage is unavailable.")
+    if args.action in {"login", "refresh"}:
+        token = direct_signon_login(profile=profile, config=config)
+        DidaV2Client(config, session_token=token).user_status()
+        store.set(profile, token)
+        print(json.dumps({"profile": profile, "stored": True, "valid": True}, ensure_ascii=False))
+        return 0
+    if args.action == "status":
+        token = store.get(profile)
+        if not token:
+            print(json.dumps({"profile": profile, "stored": False, "valid": False}, ensure_ascii=False))
+            return 1
+        try:
+            DidaV2Client(config, session_token=token).user_status()
+        except DidaV2HTTPError as exc:
+            definitively_invalid = exc.status == 401 or (
+                exc.status is None and exc.error_code == "user_not_sign_on"
+            )
+            if not definitively_invalid:
+                raise
+            store.delete(profile)
+            print(json.dumps({"profile": profile, "stored": False, "valid": False}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"profile": profile, "stored": True, "valid": True}, ensure_ascii=False))
+        return 0
+    if args.action == "logout":
+        store.delete(profile)
+        print(json.dumps({"profile": profile, "stored": False, "valid": False}, ensure_ascii=False))
+        return 0
+    raise DidaAuthError("Unsupported auth action.")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    verified_update_changes: dict[str, Any] | None = None
     try:
+        if args.resource == "auth":
+            try:
+                return _run_auth(args)
+            except Exception:
+                print("ERROR: Authentication operation failed.", file=sys.stderr)
+                return 2
+        if args.resource == "verified" and args.action == "update":
+            validator = DidaV2Verifier(None)
+            verified_update_changes = validator.validate_task_changes(_verified_task_changes_from_args(args))
+            if not args.apply:
+                payload = {
+                    "task_id": args.task_id,
+                    "project_id": args.project_id,
+                    "changes": verified_update_changes,
+                }
+                print(json.dumps({"dry_run": True, "would_verified_update": payload}, ensure_ascii=False))
+                return 0
         client = client_from_args(args)
+        if args.resource == "filters":
+            if args.action == "list":
+                print(json.dumps(client.list_filters(), ensure_ascii=False, indent=2))
+                return 0
+            selector = args.filter_id or args.filter_name
+            if args.action == "run":
+                query_service = DidaV2QueryService(client)
+                kwargs: dict[str, Any] = {}
+                if args.timezone:
+                    kwargs["timezone"] = args.timezone
+                if args.now:
+                    kwargs["now"] = args.now
+                print(
+                    json.dumps(
+                        query_service.query_saved_filter(selector, **kwargs),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 0
+            saved_filter = client.get_filter(args.filter_id) if args.filter_id else client.find_filter(args.filter_name)
+            if saved_filter is None:
+                raise DidaV2Error(f"Saved filter not found: {selector}")
+            if args.action == "get":
+                print(json.dumps(saved_filter, ensure_ascii=False, indent=2))
+                return 0
+            evaluator = SavedFilterEvaluator()
+            parsed = evaluator.parse(saved_filter.get("rule") or {})
+            print(
+                json.dumps(
+                    {"filter": saved_filter, "parsed_rule": parsed, "explanation": evaluator.explain(parsed)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
         if args.resource == "query":
             query_service = DidaV2QueryService(client)
             if args.action == "workspace":
@@ -362,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.action == "agenda":
                 agenda_kwargs: dict[str, Any] = {"date_field": args.date_field}
+                if args.timezone:
+                    agenda_kwargs["timezone"] = args.timezone
                 if args.tags:
                     agenda_kwargs["tags"] = args.tags
                 if args.text_query:
@@ -385,6 +559,21 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
         if args.resource == "verified":
             verifier = DidaV2Verifier(client)
+            if args.action == "update":
+                if verified_update_changes is None:
+                    raise DidaV2Error("Verified task update validation did not run")
+                print(
+                    json.dumps(
+                        verifier.verified_update_task(
+                            args.task_id,
+                            project_id=args.project_id,
+                            changes=verified_update_changes,
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 0
             if args.action == "move":
                 payload = {"task_id": args.task_id, "from_project_id": args.from_project, "to_project_id": args.to_project}
                 if not args.apply:
@@ -616,7 +805,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
-            print(json.dumps(client.batch_tasks(add=add, update=update, delete=delete), ensure_ascii=False, indent=2))
+            result = client.batch_tasks(add=add, update=update, delete=delete)
+            print(json.dumps(client.ensure_batch_ok(result), ensure_ascii=False, indent=2))
             return 0
         if args.resource == "tasks" and args.action == "move":
             if not args.apply:
@@ -725,7 +915,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
-            print(json.dumps(client.batch_habits(add=add, update=update, delete=delete), ensure_ascii=False, indent=2))
+            result = client.batch_habits(add=add, update=update, delete=delete)
+            print(json.dumps(client.ensure_ok_response(result), ensure_ascii=False, indent=2))
             return 0
         if args.resource == "habits" and args.action == "checkins" and args.checkin_action == "query":
             print(json.dumps(client.query_habit_checkins(args.habit_id, after_stamp=args.after_stamp), ensure_ascii=False, indent=2))
@@ -742,7 +933,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
-            print(json.dumps(client.batch_habit_checkins(add=add, update=update, delete=delete), ensure_ascii=False, indent=2))
+            result = client.batch_habit_checkins(add=add, update=update, delete=delete)
+            print(json.dumps(client.ensure_ok_response(result), ensure_ascii=False, indent=2))
             return 0
         if args.resource == "stats" and args.action == "profile":
             print(json.dumps(client.user_profile(), ensure_ascii=False, indent=2))
@@ -762,7 +954,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.resource == "stats" and args.action == "focus-timeline":
             print(json.dumps(client.focus_timeline(to_timestamp=args.to_timestamp), ensure_ascii=False, indent=2))
             return 0
-    except DidaV2Error as exc:
+    except (DidaV2Error, ValueError, ZoneInfoNotFoundError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     return 2

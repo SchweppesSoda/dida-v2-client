@@ -7,10 +7,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Callable
+from typing import Callable, Protocol, cast
 
 from .config import DidaConfig
 from .transport import DidaV2Error
+from .version import USER_AGENT
 
 HeadlessLogin = Callable[..., str]
 
@@ -19,22 +20,100 @@ class DidaAuthError(DidaV2Error):
     """Raised when no usable v2 session token can be resolved."""
 
 
-def _credential_pair(*, username_env: str, password_env: str) -> tuple[str, str]:
-    username = os.getenv(username_env) or os.getenv("TICKTICK_EMAIL")
-    password = os.getenv(password_env) or os.getenv("TICKTICK_PASSWORD")
+class SessionStore(Protocol):
+    def get(self, profile: str) -> str | None:
+        ...
+
+    def set(self, profile: str, token: str) -> None:
+        ...
+
+    def delete(self, profile: str) -> None:
+        ...
+
+
+class KeyringBackend(Protocol):
+    def get_password(self, service: str, username: str) -> str | None:
+        ...
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        ...
+
+    def delete_password(self, service: str, username: str) -> None:
+        ...
+
+
+class KeyringSessionStore:
+    """Store v2 session tokens in the operating-system credential vault."""
+
+    def __init__(self, *, backend: KeyringBackend | None = None, service_name: str = "dida-v2-client"):
+        if backend is None:
+            try:
+                import keyring  # type: ignore
+            except ImportError:
+                raise DidaAuthError("Install dida-v2-client[secure-store] to use OS session storage.") from None
+            backend = cast(KeyringBackend, keyring)
+        self.backend = backend
+        self.service_name = service_name
+
+    @staticmethod
+    def _username(profile: str) -> str:
+        normalized = DidaConfig.for_profile(profile).profile
+        return f"session:{normalized}"
+
+    @staticmethod
+    def _backend_failure(exc: Exception) -> DidaAuthError:
+        return DidaAuthError(f"OS secure session store failed ({exc.__class__.__name__}).")
+
+    def get(self, profile: str) -> str | None:
+        try:
+            return self.backend.get_password(self.service_name, self._username(profile))
+        except Exception as exc:
+            raise self._backend_failure(exc) from None
+
+    def set(self, profile: str, token: str) -> None:
+        try:
+            self.backend.set_password(self.service_name, self._username(profile), token)
+        except Exception as exc:
+            raise self._backend_failure(exc) from None
+
+    def delete(self, profile: str) -> None:
+        username = self._username(profile)
+        try:
+            if self.backend.get_password(self.service_name, username) is not None:
+                self.backend.delete_password(self.service_name, username)
+        except Exception as exc:
+            raise self._backend_failure(exc) from None
+
+
+def _credential_pair(
+    *,
+    profile: str,
+    username_env: str | None = None,
+    password_env: str | None = None,
+) -> tuple[str, str]:
+    canonical = DidaConfig.for_profile(profile).profile
+    default_username_env = "TICKTICK_EMAIL" if canonical == "ticktick" else "DIDA_EMAIL"
+    default_password_env = "TICKTICK_PASSWORD" if canonical == "ticktick" else "DIDA_PASSWORD"
+    selected_username_env = username_env or default_username_env
+    selected_password_env = password_env or default_password_env
+    username = os.getenv(selected_username_env)
+    password = os.getenv(selected_password_env)
     if not username or not password:
+        session_env = "TICKTICK_SESSION_TOKEN" if canonical == "ticktick" else "DIDA_SESSION_TOKEN"
         raise DidaAuthError(
-            f"Automated login needs local env credentials ({username_env}/{password_env}); "
-            "fallback DIDA_SESSION_TOKEN is supported for private local use."
+            f"Automated login needs local env credentials ({selected_username_env}/{selected_password_env}); "
+            f"fallback {session_env} is supported for private local use."
         )
     return username, password
 
 
-def _device_id() -> str:
-    configured = os.getenv("DIDA_DEVICE_ID") or os.getenv("TICKTICK_DEVICE_ID")
+def _device_id(profile: str) -> str:
+    canonical = DidaConfig.for_profile(profile).profile
+    device_env = "TICKTICK_DEVICE_ID" if canonical == "ticktick" else "DIDA_DEVICE_ID"
+    configured = os.getenv(device_env)
     if configured:
         if not re.fullmatch(r"[0-9a-fA-F]{24}", configured):
-            raise DidaAuthError("DIDA_DEVICE_ID/TICKTICK_DEVICE_ID must be a 24-character hex string.")
+            raise DidaAuthError(f"{device_env} must be a 24-character hex string.")
         return configured.lower()
     # Dida's sign-on endpoint rejects arbitrary/non-web-like device IDs with a
     # misleading username_password_not_match error. Keep the default stable and
@@ -43,7 +122,7 @@ def _device_id() -> str:
     return "6790a0b0c1d2e3f4a5b6c7d8"
 
 
-def _device_header() -> str:
+def _device_header(profile: str) -> str:
     return json.dumps(
         {
             "platform": "web",
@@ -51,7 +130,7 @@ def _device_header() -> str:
             "device": "dida-v2-client",
             "name": "",
             "version": 8006,
-            "id": _device_id(),
+            "id": _device_id(profile),
             "channel": "website",
         },
         separators=(",", ":"),
@@ -59,16 +138,15 @@ def _device_header() -> str:
 
 
 def _safe_error(exc: Exception) -> str:
-    text = str(exc).strip() or exc.__class__.__name__
-    return text.replace("\n", " ")[:300]
+    return exc.__class__.__name__
 
 
 def direct_signon_login(
     *,
     profile: str = "cn",
     config: DidaConfig | None = None,
-    username_env: str = "DIDA_EMAIL",
-    password_env: str = "DIDA_PASSWORD",
+    username_env: str | None = None,
+    password_env: str | None = None,
     timeout: int = 30,
 ) -> str:
     """Obtain a v2 session token through the web sign-on API.
@@ -78,7 +156,12 @@ def direct_signon_login(
     but it must only read credentials from local env/secret stores and never log them.
     """
     cfg = config or DidaConfig.for_profile(profile)
-    username, password = _credential_pair(username_env=username_env, password_env=password_env)
+    canonical = cfg.profile
+    username, password = _credential_pair(
+        profile=canonical,
+        username_env=username_env,
+        password_env=password_env,
+    )
     url = cfg.api_v2_base + "/user/signon?" + urllib.parse.urlencode({"wc": "true", "remember": "true"})
     payload = json.dumps({"username": username, "password": password}).encode("utf-8")
     request = urllib.request.Request(
@@ -87,35 +170,33 @@ def direct_signon_login(
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "dida-v2-client/0.1",
+            "User-Agent": USER_AGENT,
             "Origin": cfg.web_origin,
             "Referer": cfg.signin_url,
-            "X-Device": _device_header(),
+            "X-Device": _device_header(canonical),
         },
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
+            raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
-        detail = ""
+        status = exc.code
         try:
-            data = json.loads(body) if body else {}
-            if isinstance(data, dict):
-                code = str(data.get("errorCode") or "")
-                message = str(data.get("errorMessage") or data.get("message") or "")
-                detail = " ".join(part for part in [code, message] if part)
+            exc.close()
         except Exception:
-            detail = body[:120]
-        detail = detail.replace(username, "[USERNAME]").replace(password, "[PASSWORD]")
-        raise DidaAuthError(f"Direct sign-on failed: HTTP {exc.code} {detail}".rstrip()) from exc
-    except urllib.error.URLError as exc:
-        raise DidaAuthError(f"Direct sign-on failed: {exc.reason}") from exc
+            pass
+        raise DidaAuthError(f"Direct sign-on failed: HTTP {status}") from None
+    except (urllib.error.URLError, OSError):
+        raise DidaAuthError("Direct sign-on failed: network error") from None
+    except (UnicodeError, ValueError, RecursionError):
+        raise DidaAuthError("Direct sign-on failed: malformed response") from None
+    except Exception:
+        raise DidaAuthError("Direct sign-on failed: response handling error") from None
 
     try:
         data = json.loads(raw) if raw else {}
-    except json.JSONDecodeError as exc:
-        raise DidaAuthError("Direct sign-on returned non-JSON response.") from exc
+    except (json.JSONDecodeError, RecursionError):
+        raise DidaAuthError("Direct sign-on returned non-JSON response.") from None
     token = data.get("token") if isinstance(data, dict) else None
     if not token:
         raise DidaAuthError("Direct sign-on succeeded but did not return a session token.")
@@ -126,8 +207,8 @@ def selenium_headless_login(
     *,
     profile: str = "cn",
     config: DidaConfig | None = None,
-    username_env: str = "DIDA_EMAIL",
-    password_env: str = "DIDA_PASSWORD",
+    username_env: str | None = None,
+    password_env: str | None = None,
 ) -> str:
     """Obtain a v2 session token using Selenium headless form automation.
 
@@ -135,15 +216,20 @@ def selenium_headless_login(
     web form can be gated by captcha/Turnstile and selectors change over time.
     """
     cfg = config or DidaConfig.for_profile(profile)
-    username, password = _credential_pair(username_env=username_env, password_env=password_env)
+    canonical = cfg.profile
+    username, password = _credential_pair(
+        profile=canonical,
+        username_env=username_env,
+        password_env=password_env,
+    )
     try:
         from selenium import webdriver  # type: ignore
         from selenium.webdriver.common.by import By  # type: ignore
         from selenium.webdriver.chrome.options import Options  # type: ignore
         from selenium.webdriver.support import expected_conditions as EC  # type: ignore
         from selenium.webdriver.support.ui import WebDriverWait  # type: ignore
-    except Exception as exc:  # pragma: no cover - optional dependency path
-        raise DidaAuthError("Install dida-v2-client[headless] to use Selenium headless login.") from exc
+    except Exception:  # pragma: no cover - optional dependency path
+        raise DidaAuthError("Install dida-v2-client[headless] to use Selenium headless login.") from None
 
     options = Options()
     options.add_argument("--headless=new")
@@ -182,20 +268,38 @@ def selenium_headless_login(
     raise DidaAuthError("Selenium login finished but did not find session cookie `t`.")
 
 
-def resolve_session_token(*, profile: str = "cn", headless: bool = True, headless_login: HeadlessLogin | None = None) -> str | None:
-    """Resolve v2 session token.
+def resolve_session_token(
+    *,
+    profile: str = "cn",
+    session_token: str | None = None,
+    headless: bool = True,
+    headless_login: HeadlessLogin | None = None,
+    session_store: SessionStore | None = None,
+) -> str | None:
+    """Resolve a v2 session token in session-first order.
 
-    Default order:
-    1. injected login callback, when supplied by tests/callers;
-    2. direct Dida/TickTick web sign-on using local env credentials;
-    3. Selenium headless form fallback;
-    4. raw local session-token env fallback.
-
-    If login strategies were attempted but no raw session-token env fallback exists,
-    raise ``DidaAuthError`` with the strategy failures instead of masking them as a
-    generic "missing token" error.
+    Order: explicit token, OS secure store, profile-specific session env,
+    injected/direct sign-on, then Selenium fallback.
     """
+    if session_token:
+        return session_token
+
+    canonical = DidaConfig.for_profile(profile).profile
     errors: list[str] = []
+    if session_store is not None:
+        try:
+            stored = session_store.get(canonical)
+        except Exception as exc:
+            errors.append(f"secure session store: {exc.__class__.__name__}")
+        else:
+            if stored:
+                return stored
+
+    env_name = "TICKTICK_SESSION_TOKEN" if canonical == "ticktick" else "DIDA_SESSION_TOKEN"
+    token = os.getenv(env_name)
+    if token:
+        return token
+
     if headless:
         if headless_login is not None:
             strategies: list[tuple[str, HeadlessLogin]] = [("injected headless_login", headless_login)]
@@ -203,12 +307,9 @@ def resolve_session_token(*, profile: str = "cn", headless: bool = True, headles
             strategies = [("direct sign-on", direct_signon_login), ("selenium fallback", selenium_headless_login)]
         for name, login in strategies:
             try:
-                return login(profile=profile)
+                return login(profile=canonical)
             except Exception as exc:
                 errors.append(f"{name}: {_safe_error(exc)}")
-    token = os.getenv("DIDA_SESSION_TOKEN") or os.getenv("TICKTICK_SESSION_TOKEN")
-    if token:
-        return token
     if errors:
         raise DidaAuthError("Could not resolve v2 session token. " + "; ".join(errors))
     return None

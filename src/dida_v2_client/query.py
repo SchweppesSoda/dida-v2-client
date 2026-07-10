@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from .datetime_utils import parse_dida_datetime
+from .filters import FilterContext, SavedFilterEvaluator
+from .snapshot import SyncSnapshot, thaw_snapshot_value
+from .transport import DidaV2Error
 
 
 class DidaV2QueryService:
@@ -25,8 +31,7 @@ class DidaV2QueryService:
         folder_name_query: str | None = None,
         folder_regex: str | None = None,
     ) -> dict[str, Any]:
-        folders = self._folders()
-        projects = self._projects()
+        tasks, projects, folders = self._snapshot_collections()
         folder_by_id = {folder.get("id"): folder for folder in folders}
 
         if not include_closed:
@@ -52,7 +57,7 @@ class DidaV2QueryService:
 
         active_counts: dict[str, int] = {}
         if include_counts:
-            for task in self._tasks():
+            for task in tasks:
                 project_id = task.get("projectId")
                 if project_id:
                     active_counts[project_id] = active_counts.get(project_id, 0) + 1
@@ -111,9 +116,9 @@ class DidaV2QueryService:
         limit: int = 50,
         sort_by: str = "dueDate",
         descending: bool = False,
+        timezone: str | None = None,
     ) -> dict[str, Any]:
-        projects = self._projects()
-        folders = self._folders()
+        tasks, projects, folders = self._snapshot_collections()
         folder_by_id = {folder.get("id"): folder for folder in folders}
         project_by_id = {project.get("id"): project for project in projects}
 
@@ -130,7 +135,7 @@ class DidaV2QueryService:
         exclude_re = re.compile(exclude_regex, re.I) if exclude_regex else None
 
         rows: list[dict[str, Any]] = []
-        for task in self._tasks():
+        for task in tasks:
             project_id = task.get("projectId")
             if allowed_project_ids is not None and project_id not in allowed_project_ids:
                 continue
@@ -155,9 +160,9 @@ class DidaV2QueryService:
                 continue
             if subtasks_only and not is_subtask:
                 continue
-            if not self._in_range(task.get("dueDate"), due_from, due_to):
+            if not self._in_range(task.get("dueDate"), due_from, due_to, timezone):
                 continue
-            if not self._in_range(task.get("startDate"), start_from, start_to):
+            if not self._in_range(task.get("startDate"), start_from, start_to, timezone):
                 continue
 
             project = project_by_id.get(project_id, {})
@@ -200,13 +205,23 @@ class DidaV2QueryService:
         *,
         date_field: str = "scheduled",
         limit: int = 50,
+        timezone: str | None = None,
         **filters: Any,
     ) -> dict[str, Any]:
-        result = self.query_tasks(limit=10000, **filters)
-        items = [item for item in result["items"] if self._matches_agenda_window(item, from_dt, to_dt, date_field)]
+        result = self.query_tasks(limit=10000, timezone=timezone, **filters)
+        items = [
+            item
+            for item in result["items"]
+            if self._matches_agenda_window(item, from_dt, to_dt, date_field, timezone)
+        ]
         result["items"] = items[:limit]
         result["count"] = len(result["items"])
-        result["agenda_window"] = {"from": from_dt, "to": to_dt, "date_field": date_field}
+        result["agenda_window"] = {
+            "from": from_dt,
+            "to": to_dt,
+            "date_field": date_field,
+            "timezone": timezone,
+        }
         return result
 
     def priority_dashboard(self, *, limit: int = 50, **filters: Any) -> dict[str, Any]:
@@ -230,14 +245,120 @@ class DidaV2QueryService:
             "counts": {key: len(value) for key, value in buckets.items()},
         }
 
-    def _folders(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self.client.list_project_folders()]
+    def resolve_timezone(
+        self,
+        explicit: str | None = None,
+        *,
+        _identity: tuple[Any, str | None] | None = None,
+    ) -> str:
+        if explicit:
+            return explicit
+        get_preferences = getattr(self.client, "user_preferences", None)
+        if callable(get_preferences):
+            preferences = get_preferences(_identity=_identity) if _identity is not None else get_preferences()
+            if isinstance(preferences, dict):
+                timezone_name = preferences.get("timeZone") or preferences.get("timezone")
+                if isinstance(timezone_name, str) and timezone_name.strip():
+                    return timezone_name.strip()
+        config = _identity[0] if _identity is not None else getattr(self.client, "config", None)
+        return "Asia/Shanghai" if getattr(config, "profile", "dida") == "dida" else "UTC"
 
-    def _projects(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self.client.list_projects()]
+    def query_saved_filter(
+        self,
+        name_or_id: str,
+        *,
+        now: datetime | str | None = None,
+        timezone: str | None = None,
+    ) -> dict[str, Any]:
+        get_snapshot_with_identity = getattr(self.client, "_get_snapshot_with_identity", None)
+        if not callable(get_snapshot_with_identity):
+            raise DidaV2Error("Saved-filter queries require an identity-bound snapshot client")
+        operation: Any = get_snapshot_with_identity()
+        snapshot, identity = operation
+        if not isinstance(snapshot, SyncSnapshot):
+            raise DidaV2Error("get_snapshot() returned an unsupported snapshot type")
+        filters = [thaw_snapshot_value(item) for item in snapshot.filters]
+        matches = [item for item in filters if item.get("id") == name_or_id or item.get("name") == name_or_id]
+        if not matches:
+            raise DidaV2Error(f"Saved filter not found: {name_or_id}")
+        if len(matches) > 1:
+            raise DidaV2Error(f"Saved filter is ambiguous: {name_or_id}")
+        saved_filter = matches[0]
+        timezone_name = self.resolve_timezone(timezone, _identity=identity)
+        zone = ZoneInfo(timezone_name)
+        if now is None:
+            evaluated_at = datetime.now(zone)
+        elif isinstance(now, str):
+            evaluated_at = parse_dida_datetime(now, assume_timezone=timezone_name).astimezone(zone)
+        elif now.tzinfo is None:
+            evaluated_at = now.replace(tzinfo=zone)
+        else:
+            evaluated_at = now.astimezone(zone)
+        evaluator = SavedFilterEvaluator()
+        parsed = evaluator.parse(saved_filter.get("rule") or {})
+        projects = [thaw_snapshot_value(item) for item in snapshot.projects]
+        folders = [thaw_snapshot_value(item) for item in snapshot.project_groups]
+        project_by_id: dict[str, dict[str, Any]] = {}
+        folder_by_id: dict[str, dict[str, Any]] = {}
+        for item in projects:
+            item_id = item.get("id")
+            if isinstance(item_id, str):
+                project_by_id[item_id] = item
+        for item in folders:
+            item_id = item.get("id")
+            if isinstance(item_id, str):
+                folder_by_id[item_id] = item
+        context = FilterContext(
+            now=evaluated_at,
+            timezone=timezone_name,
+            project_by_id=project_by_id,
+            folder_by_id=folder_by_id,
+        )
+        items = evaluator.filter_tasks([thaw_snapshot_value(item) for item in snapshot.tasks], parsed, context)
+        enriched: list[dict[str, Any]] = []
+        for task in items:
+            row = dict(task)
+            project_id = task.get("projectId")
+            project = project_by_id.get(project_id, {}) if isinstance(project_id, str) else {}
+            group_id = project.get("groupId")
+            folder = folder_by_id.get(group_id, {}) if isinstance(group_id, str) else {}
+            row["project_name"] = project.get("name")
+            row["folder_name"] = folder.get("name")
+            enriched.append(row)
+        raw_sort_option = saved_filter.get("sortOption")
+        sort_option: dict[str, Any] = dict(raw_sort_option) if isinstance(raw_sort_option, dict) else {}
+        order_by = sort_option.get("orderBy")
+        if order_by:
+            enriched.sort(
+                key=lambda item: self._sort_value(item, str(order_by)),
+                reverse=str(sort_option.get("order") or "").lower() == "desc",
+            )
+        return {
+            "filter": saved_filter,
+            "parsed_rule": parsed,
+            "explanation": evaluator.explain(parsed),
+            "count": len(enriched),
+            "items": enriched,
+            "grouping": saved_filter.get("sortType") or sort_option.get("groupBy"),
+            "sort": dict(sort_option),
+            "timezone": timezone_name,
+            "evaluated_at": evaluated_at.isoformat(),
+        }
 
-    def _tasks(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self.client.list_tasks()]
+    def _snapshot_collections(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        get_snapshot = getattr(self.client, "get_snapshot", None)
+        if not callable(get_snapshot):
+            raise DidaV2Error("Composite queries require get_snapshot() returning SyncSnapshot")
+        snapshot = get_snapshot()
+        if not isinstance(snapshot, SyncSnapshot):
+            raise DidaV2Error("Composite queries require get_snapshot() returning SyncSnapshot")
+        return (
+            [thaw_snapshot_value(item) for item in snapshot.tasks],
+            [thaw_snapshot_value(item) for item in snapshot.projects],
+            [thaw_snapshot_value(item) for item in snapshot.project_groups],
+        )
 
     def _resolve_project_ids(
         self,
@@ -295,34 +416,45 @@ class DidaV2QueryService:
             return all(word in blob for word in words)
         return any(word in blob for word in words)
 
-    def _in_range(self, raw: Any, start: str | None, end: str | None) -> bool:
+    def _in_range(
+        self,
+        raw: Any,
+        start: str | None,
+        end: str | None,
+        timezone_name: str | None = None,
+    ) -> bool:
         if not start and not end:
             return True
         if not raw:
             return False
-        value = self._date_key(str(raw))
-        if start and value < self._date_key(start):
+        value = self._date_key(str(raw), timezone_name)
+        if start and value < self._date_key(start, timezone_name):
             return False
-        if end and value > self._date_key(end):
+        if end and value > self._date_key(end, timezone_name):
             return False
         return True
 
-    def _matches_agenda_window(self, task: dict[str, Any], start: str, end: str, date_field: str) -> bool:
+    def _matches_agenda_window(
+        self,
+        task: dict[str, Any],
+        start: str,
+        end: str,
+        date_field: str,
+        timezone_name: str | None = None,
+    ) -> bool:
         if date_field == "due":
-            return self._in_range(task.get("dueDate"), start, end)
+            return self._in_range(task.get("dueDate"), start, end, timezone_name)
         if date_field == "start":
-            return self._in_range(task.get("startDate"), start, end)
-        return self._in_range(task.get("dueDate"), start, end) or self._in_range(task.get("startDate"), start, end)
+            return self._in_range(task.get("startDate"), start, end, timezone_name)
+        return self._in_range(task.get("dueDate"), start, end, timezone_name) or self._in_range(
+            task.get("startDate"), start, end, timezone_name
+        )
 
-    def _date_key(self, raw: str) -> str:
-        normalized = raw.replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(normalized).isoformat()
-        except ValueError:
-            return raw
+    def _date_key(self, raw: str, timezone_name: str | None = None) -> datetime:
+        return parse_dida_datetime(raw, assume_timezone=timezone_name or "UTC").astimezone(dt_timezone.utc)
 
     def _sort_value(self, item: dict[str, Any], sort_by: str) -> Any:
         if sort_by in {"dueDate", "startDate", "createdTime", "modifiedTime"}:
             value = item.get(sort_by)
-            return (value is None, self._date_key(str(value)) if value else "")
+            return (value is None, self._date_key(str(value)).timestamp() if value else 0.0)
         return item.get(sort_by) or ""

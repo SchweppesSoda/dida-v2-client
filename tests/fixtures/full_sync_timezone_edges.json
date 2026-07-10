@@ -1,0 +1,47 @@
+{
+  "checkPoint": 102,
+  "checks": [],
+  "filters": [],
+  "inboxId": "project-inbox",
+  "projectGroups": [],
+  "projectProfiles": [
+    {
+      "id": "project-1",
+      "name": "Work",
+      "kind": "TASK",
+      "closed": false
+    }
+  ],
+  "syncTaskBean": {
+    "update": [
+      {
+        "id": "task-all-day-cn",
+        "projectId": "project-1",
+        "title": "All day task",
+        "allDay": true,
+        "priority": 5,
+        "startDate": "2026-07-09T16:00:00.000+0000",
+        "dueDate": "2026-07-10T15:59:59.000+0000",
+        "timeZone": "Asia/Shanghai",
+        "status": 0
+      },
+      {
+        "id": "task-no-due",
+        "projectId": "project-1",
+        "title": "No due",
+        "priority": 5,
+        "status": 0
+      },
+      {
+        "id": "task-medium-today",
+        "projectId": "project-1",
+        "title": "Medium today",
+        "priority": 3,
+        "dueDate": "2026-07-10T06:00:00.000+0000",
+        "timeZone": "Asia/Shanghai",
+        "status": 0
+      }
+    ]
+  },
+  "tags": []
+}

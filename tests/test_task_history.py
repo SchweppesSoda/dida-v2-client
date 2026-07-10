@@ -1,4 +1,3 @@
-import json
 from urllib.parse import parse_qs, urlparse
 
 from dida_v2_client.config import DidaConfig
