@@ -7,9 +7,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 from threading import RLock
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .config import DidaConfig
 from .snapshot import SyncSnapshot, thaw_snapshot_value
@@ -113,6 +114,11 @@ class DidaV2Client:
                 self._config = config
                 self._session_token = session_token
                 self._invalidate_snapshot_locked()
+
+    @contextmanager
+    def _identity_operation(self) -> Iterator[None]:
+        with self._snapshot_lock:
+            yield
 
     @property
     def max_read_attempts(self) -> int:
@@ -406,17 +412,33 @@ class DidaV2Client:
         fields = set(response)
         success_fields = {"id2etag", "id2error"}
         error_fields = {"errorId", "errorCode", "error"}
-        if fields <= success_fields:
-            if not all(isinstance(response[field], dict) for field in fields):
+        if fields == success_fields:
+            if not all(isinstance(response[field], dict) for field in success_fields):
                 raise DidaV2Error("V2 batch returned an unrecognized response shape")
             errors = self.batch_errors(response)
             if errors:
                 raise DidaV2Error(f"V2 batch response contains errors: {json.dumps(errors, ensure_ascii=False)}")
+            if not response["id2etag"]:
+                raise DidaV2Error("V2 batch returned an unrecognized response shape")
             return response
         if fields <= error_fields and all(isinstance(response[field], str) and response[field] for field in fields):
             errors = {field: response[field] for field in fields}
             raise DidaV2Error(f"V2 batch response contains errors: {json.dumps(errors, ensure_ascii=False)}")
         raise DidaV2Error("V2 batch returned an unrecognized response shape")
+
+    def ensure_ok_response(self, response: Any) -> Any:
+        if isinstance(response, dict) and set(response) == {"ok"} and response["ok"] is True:
+            return response
+        if isinstance(response, dict):
+            error_fields = {"errorId", "errorCode", "error"}
+            fields = set(response)
+            if fields and fields <= error_fields and all(
+                isinstance(response[field], str) and response[field] for field in fields
+            ):
+                raise DidaV2Error(
+                    f"V2 operation returned errors: {json.dumps(response, ensure_ascii=False)}"
+                )
+        raise DidaV2Error("V2 operation returned an unrecognized response shape")
 
     def create_task(self, task: dict[str, Any]) -> Any:
         return self.ensure_batch_ok(self.batch_tasks(add=[task]))
@@ -440,16 +462,22 @@ class DidaV2Client:
         return self.request("POST", "/batch/taskProject", payload=moves)
 
     def move_task(self, task_id: str, *, from_project_id: str, to_project_id: str) -> Any:
-        return self.move_tasks([{"taskId": task_id, "fromProjectId": from_project_id, "toProjectId": to_project_id}])
+        return self.ensure_batch_ok(
+            self.move_tasks([{"taskId": task_id, "fromProjectId": from_project_id, "toProjectId": to_project_id}])
+        )
 
     def batch_task_parents(self, relationships: list[dict[str, Any]]) -> Any:
         return self.request("POST", "/batch/taskParent", payload=relationships)
 
     def set_task_parent(self, task_id: str, *, project_id: str, parent_id: str) -> Any:
-        return self.batch_task_parents([{"taskId": task_id, "projectId": project_id, "parentId": parent_id}])
+        return self.ensure_batch_ok(
+            self.batch_task_parents([{"taskId": task_id, "projectId": project_id, "parentId": parent_id}])
+        )
 
     def unset_task_parent(self, task_id: str, *, project_id: str, old_parent_id: str) -> Any:
-        return self.batch_task_parents([{"taskId": task_id, "projectId": project_id, "oldParentId": old_parent_id}])
+        return self.ensure_batch_ok(
+            self.batch_task_parents([{"taskId": task_id, "projectId": project_id, "oldParentId": old_parent_id}])
+        )
 
     def list_tags(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
@@ -473,7 +501,7 @@ class DidaV2Client:
             tag["parent"] = parent
         if sort_type is not None:
             tag["sortType"] = sort_type
-        return self.batch_tags(add=[tag])
+        return self.ensure_batch_ok(self.batch_tags(add=[tag]))
 
     def update_tag(
         self,
@@ -493,7 +521,7 @@ class DidaV2Client:
             tag["sortType"] = sort_type
         if sort_order is not None:
             tag["sortOrder"] = sort_order
-        return self.batch_tags(update=[tag])
+        return self.ensure_batch_ok(self.batch_tags(update=[tag]))
 
     def delete_tag(self, name: str) -> Any:
         return self.request("DELETE", "/tag", params={"name": name})
@@ -529,7 +557,7 @@ class DidaV2Client:
         )
 
     def delete_column(self, project_id: str, column_id: str) -> Any:
-        return self.batch_columns(project_id=project_id, delete=[column_id])
+        return self.ensure_batch_ok(self.batch_columns(project_id=project_id, delete=[column_id]))
 
     def list_project_folders(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
@@ -552,7 +580,7 @@ class DidaV2Client:
         folder: dict[str, Any] = {"name": name}
         if sort_order is not None:
             folder["sortOrder"] = sort_order
-        return self.batch_project_folders(add=[folder])
+        return self.ensure_batch_ok(self.batch_project_folders(add=[folder]))
 
     def update_project_folder(self, folder_id: str, *, name: str | None = None, sort_order: int | None = None) -> Any:
         folder: dict[str, Any] = {"id": folder_id}
@@ -560,26 +588,32 @@ class DidaV2Client:
             folder["name"] = name
         if sort_order is not None:
             folder["sortOrder"] = sort_order
-        return self.batch_project_folders(update=[folder])
+        return self.ensure_batch_ok(self.batch_project_folders(update=[folder]))
 
     def delete_project_folder(self, folder_id: str) -> Any:
-        return self.batch_project_folders(delete=[folder_id])
+        return self.ensure_batch_ok(self.batch_project_folders(delete=[folder_id]))
 
     def list_projects(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
         return [thaw_snapshot_value(project) for project in current.projects]
 
-    def batch_projects(self, *, update: list[dict[str, Any]]) -> Any:
-        return self.request("POST", "/batch/project", payload={"update": update})
+    def batch_projects(
+        self,
+        *,
+        update: list[dict[str, Any]],
+        _identity: tuple[DidaConfig, str | None] | None = None,
+    ) -> Any:
+        return self.request("POST", "/batch/project", payload={"update": update}, _identity=_identity)
 
     def set_project_folder(self, project_id: str, folder_id: str | None) -> Any:
-        project = next((item for item in self.list_projects() if item.get("id") == project_id), None)
+        snapshot, identity = self._get_snapshot_with_identity()
+        project = next((item for item in self.list_projects(snapshot=snapshot) if item.get("id") == project_id), None)
         if project is None:
             raise DidaV2Error(f"Project not found in v2 sync: {project_id}")
         update_item = {key: value for key, value in project.items() if value is not None}
         update_item["id"] = project_id
         update_item["groupId"] = folder_id
-        return self.batch_projects(update=[update_item])
+        return self.ensure_batch_ok(self.batch_projects(update=[update_item], _identity=identity))
 
     def list_closed_tasks(self, *, from_date: str, to_date: str, status: str = "Completed", limit: int = 100) -> list[dict[str, Any]]:
         data = self.request(

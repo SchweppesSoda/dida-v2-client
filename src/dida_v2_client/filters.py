@@ -27,7 +27,10 @@ class FilterContext:
 class SavedFilterEvaluator:
     _SUPPORTED_CONDITIONS = {"priority", "dueDate", "startDate"}
     _SUPPORTED_PRIORITIES = {0, 1, 3, 5}
-    _SUPPORTED_RELATIVE_DATES = {"overdue", "today", "tomorrow", "yesterday", "thisWeek", "nextWeek"}
+    _SUPPORTED_RELATIVE_DATES = {
+        "dueDate": {"overdue", "today", "tomorrow", "yesterday", "thisWeek", "nextWeek"},
+        "startDate": {"today", "tomorrow", "yesterday", "thisWeek", "nextWeek"},
+    }
 
     def parse(self, raw_rule: str | dict[str, Any]) -> dict[str, Any]:
         if isinstance(raw_rule, str):
@@ -70,14 +73,15 @@ class SavedFilterEvaluator:
             }
         return {"operator": "condition", "conditions": [self._explain_node(rule)]}
 
-    def _validate_node(self, node: Any) -> None:
+    def _validate_node(self, node: Any, *, is_root: bool = True) -> None:
         if not isinstance(node, dict):
             raise FilterRuleError("Saved filter condition must be an object")
         condition = node.get("conditionName")
         has_condition = "conditionName" in node
         if "and" in node and ("or" in node or has_condition):
             raise FilterRuleError("Saved filter node has mixed boolean/leaf shapes")
-        if "and" in node or ("or" in node and not has_condition):
+        is_group = "and" in node or ("or" in node and not has_condition)
+        if is_group:
             allowed_keys = {"and", "or", "type", "version"}
         elif has_condition:
             allowed_keys = {"conditionName", "or", "conditionType"}
@@ -87,13 +91,23 @@ class SavedFilterEvaluator:
         if unexpected:
             key = sorted(unexpected)[0]
             raise FilterRuleError(f"Saved filter node has unexpected key: {key}")
+        if is_group:
+            if not is_root and ({"type", "version"} & set(node)):
+                raise FilterRuleError("Saved filter group metadata placement is unsupported")
+            if "type" in node and (type(node["type"]) is not int or node["type"] != 0):
+                raise FilterRuleError("Saved filter group metadata type is unsupported")
+            if "version" in node and (type(node["version"]) is not int or node["version"] != 1):
+                raise FilterRuleError("Saved filter group metadata version is unsupported")
+        elif has_condition and "conditionType" in node:
+            if type(node["conditionType"]) is not int or node["conditionType"] != 1:
+                raise FilterRuleError("Saved filter leaf metadata conditionType is unsupported")
         if "and" in node:
             if not isinstance(node["and"], list):
                 raise FilterRuleError("Saved filter and-group must be a list")
             if not node["and"]:
                 raise FilterRuleError("Saved filter boolean group must not be empty")
             for child in node["and"]:
-                self._validate_node(child)
+                self._validate_node(child, is_root=False)
             return
         if "or" in node and not has_condition:
             if not isinstance(node["or"], list):
@@ -101,7 +115,7 @@ class SavedFilterEvaluator:
             if not node["or"]:
                 raise FilterRuleError("Saved filter boolean group must not be empty")
             for child in node["or"]:
-                self._validate_node(child)
+                self._validate_node(child, is_root=False)
             return
         values = node.get("or")
         if not condition or not isinstance(values, list):
@@ -115,7 +129,8 @@ class SavedFilterEvaluator:
             if invalid:
                 raise FilterRuleError(f"Saved filter value is not a supported priority: {invalid[0]!r}")
         if condition in {"dueDate", "startDate"}:
-            invalid = [value for value in values if not isinstance(value, str) or value not in self._SUPPORTED_RELATIVE_DATES]
+            supported_values = self._SUPPORTED_RELATIVE_DATES[condition]
+            invalid = [value for value in values if not isinstance(value, str) or value not in supported_values]
             if invalid:
                 raise FilterRuleError(f"Unsupported relative date keyword: {invalid[0]}")
 

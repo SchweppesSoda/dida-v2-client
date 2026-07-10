@@ -51,7 +51,7 @@ def test_update_tag_uses_v2_batch_tag_update(monkeypatch):
 
     def fake_urlopen(req, timeout):
         seen["body"] = json.loads(req.data.decode("utf-8"))
-        return FakeResponse(b"{}")
+        return FakeResponse(b'{"id2etag":{"New":"etag"},"id2error":{}}')
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     client = DidaV2Client(DidaConfig.default(), session_token="SECRET")

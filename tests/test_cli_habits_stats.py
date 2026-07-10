@@ -1,6 +1,7 @@
 import json
 
 from dida_v2_client import cli
+from dida_v2_client.transport import DidaV2Error
 
 
 class FakeClient:
@@ -18,6 +19,9 @@ class FakeClient:
 
     def batch_habit_checkins(self, **kwargs):
         return {"checkins_batched": kwargs}
+
+    def ensure_ok_response(self, response):
+        return response
 
     def user_profile(self):
         return {"profile": True}
@@ -58,6 +62,20 @@ def test_habits_batch_dry_run(monkeypatch, capsys):
     }
 
 
+def test_habits_batch_apply_rejects_malformed_response(monkeypatch, capsys):
+    class MalformedClient(FakeClient):
+        def batch_habits(self, **kwargs):
+            return {"unexpected": True}
+
+        def ensure_ok_response(self, response):
+            raise DidaV2Error("Habit batch returned an unrecognized response shape")
+
+    monkeypatch.setattr(cli, "client_from_args", lambda args: MalformedClient())
+
+    assert cli.main(["habits", "batch", "--add-json", '[{"name":"Drink"}]', "--apply"]) == 2
+    assert "unrecognized response shape" in capsys.readouterr().err
+
+
 def test_habit_checkins_query_and_batch_cli(monkeypatch, capsys):
     monkeypatch.setattr(cli, "client_from_args", lambda args: FakeClient())
 
@@ -66,6 +84,20 @@ def test_habit_checkins_query_and_batch_cli(monkeypatch, capsys):
 
     assert cli.main(["habits", "checkins", "batch", "--update-json", '[{"id":"c1"}]', "--apply"]) == 0
     assert json.loads(capsys.readouterr().out) == {"checkins_batched": {"add": [], "update": [{"id": "c1"}], "delete": []}}
+
+
+def test_habit_checkins_batch_apply_rejects_malformed_response(monkeypatch, capsys):
+    class MalformedClient(FakeClient):
+        def batch_habit_checkins(self, **kwargs):
+            return {"unexpected": True}
+
+        def ensure_ok_response(self, response):
+            raise DidaV2Error("Habit check-in batch returned an unrecognized response shape")
+
+    monkeypatch.setattr(cli, "client_from_args", lambda args: MalformedClient())
+
+    assert cli.main(["habits", "checkins", "batch", "--update-json", '[{"id":"c1"}]', "--apply"]) == 2
+    assert "unrecognized response shape" in capsys.readouterr().err
 
 
 def test_stats_cli(monkeypatch, capsys):

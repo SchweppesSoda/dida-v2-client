@@ -244,7 +244,7 @@ def test_successful_write_invalidates_snapshot_and_cache_time(monkeypatch):
             return False
 
         def read(self):
-            return b'{"id2etag":{},"id2error":{}}'
+            return b'{"id2etag":{"task-1":"etag"},"id2error":{}}'
 
     monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: FakeResponse())
     current_time = [100.0]
@@ -305,7 +305,7 @@ def test_inflight_snapshot_cannot_repopulate_cache_after_successful_write(monkey
             return False
 
         def read(self):
-            return b'{"id2etag":{},"id2error":{}}'
+            return b'{"id2etag":{"task-1":"etag"},"id2error":{}}'
 
     monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: FakeResponse())
     client = DidaV2Client(DidaConfig.default(), session_token="TEST")

@@ -31,8 +31,7 @@ class DidaV2QueryService:
         folder_name_query: str | None = None,
         folder_regex: str | None = None,
     ) -> dict[str, Any]:
-        folders = self._folders()
-        projects = self._projects()
+        tasks, projects, folders = self._snapshot_collections()
         folder_by_id = {folder.get("id"): folder for folder in folders}
 
         if not include_closed:
@@ -58,7 +57,7 @@ class DidaV2QueryService:
 
         active_counts: dict[str, int] = {}
         if include_counts:
-            for task in self._tasks():
+            for task in tasks:
                 project_id = task.get("projectId")
                 if project_id:
                     active_counts[project_id] = active_counts.get(project_id, 0) + 1
@@ -119,8 +118,7 @@ class DidaV2QueryService:
         descending: bool = False,
         timezone: str | None = None,
     ) -> dict[str, Any]:
-        projects = self._projects()
-        folders = self._folders()
+        tasks, projects, folders = self._snapshot_collections()
         folder_by_id = {folder.get("id"): folder for folder in folders}
         project_by_id = {project.get("id"): project for project in projects}
 
@@ -137,7 +135,7 @@ class DidaV2QueryService:
         exclude_re = re.compile(exclude_regex, re.I) if exclude_regex else None
 
         rows: list[dict[str, Any]] = []
-        for task in self._tasks():
+        for task in tasks:
             project_id = task.get("projectId")
             if allowed_project_ids is not None and project_id not in allowed_project_ids:
                 continue
@@ -273,15 +271,10 @@ class DidaV2QueryService:
         timezone: str | None = None,
     ) -> dict[str, Any]:
         get_snapshot_with_identity = getattr(self.client, "_get_snapshot_with_identity", None)
-        if callable(get_snapshot_with_identity):
-            operation: Any = get_snapshot_with_identity()
-            snapshot, identity = operation
-        else:
-            get_snapshot = getattr(self.client, "get_snapshot", None)
-            if not callable(get_snapshot):
-                raise DidaV2Error("Saved-filter queries require a client with get_snapshot()")
-            snapshot = get_snapshot()
-            identity = None
+        if not callable(get_snapshot_with_identity):
+            raise DidaV2Error("Saved-filter queries require an identity-bound snapshot client")
+        operation: Any = get_snapshot_with_identity()
+        snapshot, identity = operation
         if not isinstance(snapshot, SyncSnapshot):
             raise DidaV2Error("get_snapshot() returned an unsupported snapshot type")
         filters = [thaw_snapshot_value(item) for item in snapshot.filters]
@@ -352,14 +345,20 @@ class DidaV2QueryService:
             "evaluated_at": evaluated_at.isoformat(),
         }
 
-    def _folders(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self.client.list_project_folders()]
-
-    def _projects(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self.client.list_projects()]
-
-    def _tasks(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self.client.list_tasks()]
+    def _snapshot_collections(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        get_snapshot = getattr(self.client, "get_snapshot", None)
+        if not callable(get_snapshot):
+            raise DidaV2Error("Composite queries require get_snapshot() returning SyncSnapshot")
+        snapshot = get_snapshot()
+        if not isinstance(snapshot, SyncSnapshot):
+            raise DidaV2Error("Composite queries require get_snapshot() returning SyncSnapshot")
+        return (
+            [thaw_snapshot_value(item) for item in snapshot.tasks],
+            [thaw_snapshot_value(item) for item in snapshot.projects],
+            [thaw_snapshot_value(item) for item in snapshot.project_groups],
+        )
 
     def _resolve_project_ids(
         self,

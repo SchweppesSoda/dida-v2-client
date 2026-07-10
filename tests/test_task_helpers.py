@@ -8,7 +8,7 @@ from dida_v2_client.transport import DidaV2Client, DidaV2Error
 
 
 class FakeResponse:
-    def __init__(self, body=b'{"id2etag":{},"id2error":{}}'):
+    def __init__(self, body=b'{"id2etag":{"ack":"etag"},"id2error":{}}'):
         self.status = 200
         self._body = body
 
@@ -70,6 +70,9 @@ def test_typed_task_helpers_validate_batch_errors(monkeypatch):
         {"unexpected": True},
         {"id2etag": []},
         {"id2error": []},
+        {"id2etag": {}},
+        {"id2error": {}},
+        {"id2etag": {}, "id2error": {}},
         {"id2etag": {}, "unknown": 1},
         {"id2etag": {}, "errorCode": None},
         {"id2etag": {}, "errorId": []},
@@ -99,3 +102,25 @@ def test_batch_error_helpers_handle_known_error_shapes():
         "errorId": "user_not_sign_on",
         "errorCode": "user_not_sign_on",
     }
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "kwargs"),
+    [
+        ("move_task", ("t1",), {"from_project_id": "p1", "to_project_id": "p2"}),
+        ("set_task_parent", ("t1",), {"project_id": "p1", "parent_id": "parent"}),
+        ("unset_task_parent", ("t1",), {"project_id": "p1", "old_parent_id": "parent"}),
+        ("create_tag", ("work",), {}),
+        ("update_tag", ("work",), {"color": "#000000"}),
+        ("delete_column", ("p1", "c1"), {}),
+        ("create_project_folder", ("Folder",), {}),
+        ("update_project_folder", ("g1",), {"name": "Renamed"}),
+        ("delete_project_folder", ("g1",), {}),
+    ],
+)
+def test_typed_batch_helpers_reject_unknown_response_shapes(monkeypatch, method, args, kwargs):
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: FakeResponse(b'{"unexpected":true}'))
+    client = DidaV2Client(DidaConfig.default(), session_token="SECRET")
+
+    with pytest.raises(DidaV2Error, match="unrecognized response shape"):
+        getattr(client, method)(*args, **kwargs)

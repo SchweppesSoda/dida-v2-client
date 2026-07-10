@@ -1,4 +1,9 @@
+import pytest
+
+from dida_v2_client.config import DidaConfig
 from dida_v2_client.query import DidaV2QueryService
+from dida_v2_client.snapshot import SyncSnapshot
+from dida_v2_client.transport import DidaV2Client, DidaV2Error
 
 
 class FakeClient:
@@ -48,6 +53,55 @@ class FakeClient:
                 "parentId": "parent-1",
             },
         ]
+
+    def get_snapshot(self):
+        return SyncSnapshot.from_payload(
+            {
+                "projectGroups": self.list_project_folders(),
+                "projectProfiles": self.list_projects(),
+                "syncTaskBean": {"update": self.list_tasks()},
+            }
+        )
+
+
+class IdentitySwitchingSyncClient(DidaV2Client):
+    def __init__(self):
+        super().__init__(DidaConfig.for_profile("dida"), "TOKEN_A")
+
+    def full_sync(self, *, _identity=None):
+        config, _session = _identity or (self.config, self.session_token)
+        profile = config.profile
+        if profile == "dida":
+            self.set_identity(DidaConfig.for_profile("ticktick"), "TOKEN_B")
+        suffix = "a" if profile == "dida" else "b"
+        return {
+            "projectGroups": [{"id": f"g-{suffix}", "name": f"Folder {suffix.upper()}"}],
+            "projectProfiles": [
+                {"id": f"p-{suffix}", "name": f"Project {suffix.upper()}", "groupId": f"g-{suffix}"}
+            ],
+            "syncTaskBean": {"update": [{"id": f"t-{suffix}", "projectId": f"p-{suffix}"}]},
+        }
+
+
+def test_workspace_map_uses_one_snapshot_during_identity_change():
+    service = DidaV2QueryService(IdentitySwitchingSyncClient())
+
+    result = service.workspace_map(include_counts=True)
+
+    assert result["project_count"] == 1
+    assert result["folders"][0]["id"] == "g-a"
+    assert result["folders"][0]["projects"][0]["id"] == "p-a"
+    assert result["folders"][0]["projects"][0]["task_count_active"] == 1
+
+
+def test_composite_query_rejects_list_only_client():
+    class ListOnlyClient(FakeClient):
+        get_snapshot = None
+
+    service = DidaV2QueryService(ListOnlyClient())
+
+    with pytest.raises(DidaV2Error, match="SyncSnapshot"):
+        service.query_tasks()
 
 
 def test_workspace_map_groups_projects_and_counts_tasks():

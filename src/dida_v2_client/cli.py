@@ -256,6 +256,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     verified = sub.add_parser("verified")
     verified_sub = verified.add_subparsers(dest="action", required=True)
+    v_update = verified_sub.add_parser("update")
+    v_update.add_argument("task_id")
+    v_update.add_argument("--project-id", required=True)
+    v_update.add_argument("--title")
+    v_update.add_argument("--content")
+    v_update.add_argument("--desc")
+    v_update.add_argument("--priority", type=int)
+    v_update.add_argument("--status", type=int, choices=[-1, 0, 2])
+    v_update.add_argument("--tag", action="append", dest="tags")
+    v_update.add_argument("--due-date")
+    v_update.add_argument("--start-date")
+    v_update.add_argument("--time-zone")
+    v_update.add_argument("--column-id")
+    all_day = v_update.add_mutually_exclusive_group()
+    all_day.add_argument("--all-day", dest="all_day", action="store_true")
+    all_day.add_argument("--not-all-day", dest="all_day", action="store_false")
+    v_update.set_defaults(all_day=None)
+    v_update.add_argument("--items-json")
+    v_update.add_argument("--apply", action="store_true")
     v_move = verified_sub.add_parser("move")
     v_move.add_argument("task_id")
     v_move.add_argument("--from-project", required=True)
@@ -337,6 +356,30 @@ def _task_payload_from_args(args: argparse.Namespace, *, include_id: bool = Fals
     if getattr(args, "items_json", None):
         payload["items"] = _json_list_arg(args.items_json)
     return payload
+
+
+def _verified_task_changes_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    field_map = {
+        "title": "title",
+        "content": "content",
+        "desc": "desc",
+        "priority": "priority",
+        "status": "status",
+        "due_date": "dueDate",
+        "start_date": "startDate",
+        "time_zone": "timeZone",
+        "column_id": "columnId",
+        "all_day": "allDay",
+        "tags": "tags",
+    }
+    changes = {
+        api_key: value
+        for attr, api_key in field_map.items()
+        if (value := getattr(args, attr, None)) is not None
+    }
+    if getattr(args, "items_json", None) is not None:
+        changes["items"] = _json_list_arg(args.items_json)
+    return changes
 
 
 def _query_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
@@ -504,6 +547,24 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
         if args.resource == "verified":
             verifier = DidaV2Verifier(client)
+            if args.action == "update":
+                changes = verifier.validate_task_changes(_verified_task_changes_from_args(args))
+                payload = {"task_id": args.task_id, "project_id": args.project_id, "changes": changes}
+                if not args.apply:
+                    print(json.dumps({"dry_run": True, "would_verified_update": payload}, ensure_ascii=False))
+                    return 0
+                print(
+                    json.dumps(
+                        verifier.verified_update_task(
+                            args.task_id,
+                            project_id=args.project_id,
+                            changes=changes,
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 0
             if args.action == "move":
                 payload = {"task_id": args.task_id, "from_project_id": args.from_project, "to_project_id": args.to_project}
                 if not args.apply:
@@ -735,7 +796,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
-            print(json.dumps(client.batch_tasks(add=add, update=update, delete=delete), ensure_ascii=False, indent=2))
+            result = client.batch_tasks(add=add, update=update, delete=delete)
+            print(json.dumps(client.ensure_batch_ok(result), ensure_ascii=False, indent=2))
             return 0
         if args.resource == "tasks" and args.action == "move":
             if not args.apply:
@@ -844,7 +906,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
-            print(json.dumps(client.batch_habits(add=add, update=update, delete=delete), ensure_ascii=False, indent=2))
+            result = client.batch_habits(add=add, update=update, delete=delete)
+            print(json.dumps(client.ensure_ok_response(result), ensure_ascii=False, indent=2))
             return 0
         if args.resource == "habits" and args.action == "checkins" and args.checkin_action == "query":
             print(json.dumps(client.query_habit_checkins(args.habit_id, after_stamp=args.after_stamp), ensure_ascii=False, indent=2))
@@ -861,7 +924,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
-            print(json.dumps(client.batch_habit_checkins(add=add, update=update, delete=delete), ensure_ascii=False, indent=2))
+            result = client.batch_habit_checkins(add=add, update=update, delete=delete)
+            print(json.dumps(client.ensure_ok_response(result), ensure_ascii=False, indent=2))
             return 0
         if args.resource == "stats" and args.action == "profile":
             print(json.dumps(client.user_profile(), ensure_ascii=False, indent=2))

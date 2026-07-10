@@ -191,6 +191,63 @@ def test_saved_filter_rejects_mixed_boolean_shapes(mixed):
         evaluator.matches({"priority": 5}, mixed, context)
 
 
+def test_saved_filter_rejects_start_date_overdue():
+    evaluator = SavedFilterEvaluator()
+    context = FilterContext(
+        now=datetime(2026, 7, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai")),
+        timezone="Asia/Shanghai",
+    )
+
+    with pytest.raises(FilterRuleError, match="Unsupported relative date keyword"):
+        evaluator.matches(
+            {"startDate": "2026-07-09T00:00:00+0800"},
+            {"conditionName": "startDate", "or": ["overdue"]},
+            context,
+        )
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"type": {}, "version": 1, "and": [{"conditionName": "priority", "conditionType": 1, "or": [5]}]},
+        {"type": 0, "version": "future", "and": [{"conditionName": "priority", "conditionType": 1, "or": [5]}]},
+        {"conditionName": "priority", "conditionType": 999, "or": [5]},
+        {"conditionName": "priority", "conditionType": True, "or": [5]},
+    ],
+)
+def test_saved_filter_rejects_unknown_metadata(rule):
+    evaluator = SavedFilterEvaluator()
+    context = FilterContext(
+        now=datetime(2026, 7, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai")),
+        timezone="Asia/Shanghai",
+    )
+
+    with pytest.raises(FilterRuleError, match="metadata"):
+        evaluator.matches({"priority": 5}, rule, context)
+
+
+def test_saved_filter_rejects_metadata_on_nested_group():
+    evaluator = SavedFilterEvaluator()
+    context = FilterContext(
+        now=datetime(2026, 7, 10, 9, tzinfo=ZoneInfo("Asia/Shanghai")),
+        timezone="Asia/Shanghai",
+    )
+    rule = {
+        "type": 0,
+        "version": 1,
+        "and": [
+            {
+                "type": 0,
+                "version": 1,
+                "or": [{"conditionName": "priority", "conditionType": 1, "or": [5]}],
+            }
+        ],
+    }
+
+    with pytest.raises(FilterRuleError, match="metadata placement"):
+        evaluator.matches({"priority": 5}, rule, context)
+
+
 @pytest.mark.parametrize(
     "rule",
     [
