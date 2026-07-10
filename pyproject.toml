@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dida-v2-client"
-version = "0.1.2"
+version = "0.2.0"
 description = "Small Dida365-first private v2 client with CLI"
 readme = "README.md"
 requires-python = ">=3.9"

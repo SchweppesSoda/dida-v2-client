@@ -5,7 +5,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class SyncSnapshot:
     """Read-only view over one Dida/TickTick full-sync payload."""
 

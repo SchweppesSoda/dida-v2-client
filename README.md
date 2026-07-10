@@ -42,6 +42,12 @@ v2:  https://api.ticktick.com/api/v2
 # session / sync; credentials stay in local env/secret store, not chat
 DIDA_EMAIL='<local-email>' DIDA_PASSWORD='<local-password>' uv run dida-v2 status
 
+# saved Web UI filters / smart lists
+uv run dida-v2 filters list
+uv run dida-v2 filters get --name 'Today P1'
+uv run dida-v2 filters explain --name 'Today P1'
+uv run dida-v2 filters run --name 'Today P1' --timezone Asia/Shanghai
+
 # tags
 uv run dida-v2 --no-headless tags list
 uv run dida-v2 --no-headless tags create 新标签 --color '#4AA6EF'       # dry-run
@@ -118,21 +124,24 @@ Do not paste session tokens, passwords, or cookies into chat. Prefer direct loca
 
 ## Current scope
 
-Implemented in v0.1:
+Implemented through v0.2.0:
 
 - config profiles: `dida` and `ticktick` (`cn`/`global` remain compatibility aliases)
 - v2 transport with cookie auth
 - session/account: `user_status()`, `user_profile()`, `user_preferences()`
-- sync: `full_sync()`
+- sync: `full_sync()`, immutable `SyncSnapshot`, and in-client snapshot reuse with write invalidation
+- saved Web UI filters: `list_filters()`, `get_filter()`, `find_filter()`, `SavedFilterEvaluator`, and `filters list/get/explain/run`
 - tasks: `list_tasks()`, `get_task()`, `batch_tasks()`, `batch_errors()`, `ensure_batch_ok()`, `create_task()`, `update_task()`, `delete_task()`, `complete_task()`, `reopen_task()`, `abandon_task()`, `move_tasks()`, `move_task()`, `batch_task_parents()`, `set_task_parent()`, `unset_task_parent()`, `list_closed_tasks()`, `list_trash_tasks()`
 - tags: `list_tags()`, `batch_tags()`, `create_tag()`, `update_tag()`, `delete_tag()`, `rename_tag()`, `merge_tags()`
 - columns: `list_columns()`, `batch_columns()`, `delete_column()`
 - folders/projects: `list_project_folders()`, `batch_project_folders()`, `create_project_folder()`, `update_project_folder()`, `delete_project_folder()`, `list_projects()`, `batch_projects()`, `set_project_folder()`
 - habits/check-ins: `list_habits()`, `list_habit_sections()`, `batch_habits()`, `query_habit_checkins()`, `batch_habit_checkins()`
 - focus/productivity stats: `productivity_stats()`, `focus_heatmap()`, `focus_distribution()`, `focus_timeline()`
-- query/read layer: `DidaV2QueryService.workspace_map()`, `query_tasks()`, `query_agenda()`, `priority_dashboard()`
+- query/read layer: `DidaV2QueryService.workspace_map()`, `query_tasks()`, timezone-aware `query_agenda()`, `priority_dashboard()`, and `query_saved_filter()`
 - verified action layer: `DidaV2Verifier.verified_move_task()`, `verified_set_task_parent()`, `verified_unset_task_parent()`, `verified_set_project_folder()`
 - CLI dry-run/apply for write operations; read-only commands for history, trash, stats, sync-backed lists, and query views
+
+Saved-filter evaluation currently supports nested boolean groups, `priority`, and relative `dueDate`/`startDate` values (`today`, `tomorrow`, `yesterday`, `thisWeek`, `nextWeek`, `overdue`). Unknown conditions fail closed with `UnsupportedFilterCondition`; the client does not guess private write endpoints for filter CRUD.
 
 See `docs/v2-capability-matrix.md` for migration status and remaining v2-first work.
 

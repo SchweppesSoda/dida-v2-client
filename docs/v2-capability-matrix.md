@@ -32,7 +32,9 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 | Auth/session | account status | `GET /user/status` | `user_status()` | `status` |
 | Account | profile | `GET /user/profile` | `user_profile()` | `stats profile` |
 | Account | preferences/settings | `GET /user/preferences/settings?includeWeb=true` | `user_preferences()` | `stats preferences` |
-| Sync | full sync | `GET /batch/check/0` | `full_sync()` | used internally |
+| Sync | full sync and reusable operation snapshot | `GET /batch/check/0` | `full_sync()`, `get_snapshot()`, `SyncSnapshot` | used internally |
+| Saved filters | list/get/find saved Web UI filters via sync | `GET /batch/check/0` | `list_filters()`, `get_filter()`, `find_filter()` | `filters list/get` |
+| Saved filters | parse, explain, and execute supported rules locally | no extra endpoint | `SavedFilterEvaluator`, `query_saved_filter()` | `filters explain/run` |
 | Tasks | active task list/get via sync | `GET /batch/check/0` | `list_tasks()`, `get_task()` | `tasks list`, `tasks get` |
 | Tasks | generic add/update/delete batch | `POST /batch/task` | `batch_tasks()` | `tasks batch` |
 | Tasks | typed create/update/delete | `POST /batch/task` | `create_task()`, `update_task()`, `delete_task()` | `tasks create/update/delete` |
@@ -58,7 +60,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 | Productivity | general stats | `GET /statistics/general` | `productivity_stats()` | `stats productivity` |
 | Query | workspace map and project/folder grouping | `GET /batch/check/0` | `DidaV2QueryService.workspace_map()` | `query workspace` |
 | Query | task filtering by project/folder/tag/text/date/priority/hierarchy | `GET /batch/check/0` | `DidaV2QueryService.query_tasks()` | `query tasks` |
-| Query | due/start/scheduled agenda windows | `GET /batch/check/0` | `DidaV2QueryService.query_agenda()` | `query agenda` |
+| Query | timezone-aware due/start/scheduled agenda windows | `GET /batch/check/0` | `DidaV2QueryService.query_agenda()` | `query agenda --timezone` |
 | Query | priority buckets/dashboard | `GET /batch/check/0` | `DidaV2QueryService.priority_dashboard()` | `query priority-dashboard` |
 | Verified actions | read-back verified move | `POST /batch/taskProject` + `GET /batch/check/0` | `DidaV2Verifier.verified_move_task()` | `verified move` |
 | Verified actions | read-back verified parent set/unset | `POST /batch/taskParent` + `GET /batch/check/0` | `verified_set_task_parent()`, `verified_unset_task_parent()` | `verified set-parent`, `verified unset-parent` |
@@ -91,6 +93,12 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 6. **Columns and tags**
    - v2 has working private endpoints for operations missing in the current `dida` CLI: tag delete/rename/merge and column batch/delete.
    - Apply only after dry-run and read-back.
+
+7. **Saved filters and timezone**
+   - Saved filters are read from `GET /batch/check/0`; their `rule` field is JSON encoded and evaluated locally.
+   - The evaluator intentionally fails closed on unknown conditions instead of silently returning an incomplete view.
+   - Agenda/filter relative dates are converted through `zoneinfo`; Dida365 defaults should use `Asia/Shanghai` when no stronger account/task timezone is available.
+   - Sync evidence does not prove create/update/delete endpoints for filters. Filter CRUD remains unsupported until endpoint evidence and disposable live verification exist.
 
 ## Evidence-only / not yet wrapped
 

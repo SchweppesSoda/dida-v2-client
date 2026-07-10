@@ -16,7 +16,7 @@ class UnsupportedFilterCondition(FilterRuleError):
     """Raised when a saved filter contains a condition we do not implement."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class FilterContext:
     now: datetime
     timezone: str
