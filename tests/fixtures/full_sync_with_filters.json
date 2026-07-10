@@ -1,0 +1,42 @@
+{
+  "checkPoint": 101,
+  "checks": [],
+  "filters": [
+    {
+      "id": "filter-today-p1",
+      "name": "Today P1",
+      "rule": "{\"and\":[{\"conditionType\":1,\"or\":[5],\"conditionName\":\"priority\"},{\"conditionType\":1,\"or\":[\"today\"],\"conditionName\":\"dueDate\"}],\"type\":0,\"version\":1}",
+      "sortType": "project",
+      "sortOption": {
+        "groupBy": "project",
+        "orderBy": "dueDate",
+        "order": null
+      }
+    }
+  ],
+  "inboxId": "project-inbox",
+  "projectGroups": [
+    {
+      "id": "group-work",
+      "name": "Work"
+    }
+  ],
+  "projectProfiles": [
+    {
+      "id": "project-1",
+      "name": "Work List",
+      "groupId": "group-work",
+      "kind": "TASK",
+      "closed": false
+    }
+  ],
+  "syncTaskBean": {
+    "update": []
+  },
+  "tags": [
+    {
+      "name": "work",
+      "label": "work"
+    }
+  ]
+}

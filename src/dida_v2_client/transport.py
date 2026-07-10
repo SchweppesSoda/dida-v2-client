@@ -7,6 +7,7 @@ import urllib.request
 from typing import Any
 
 from .config import DidaConfig
+from .snapshot import SyncSnapshot
 
 
 class DidaV2Error(RuntimeError):
@@ -17,6 +18,7 @@ class DidaV2Client:
     def __init__(self, config: DidaConfig | None = None, session_token: str | None = None):
         self.config = config or DidaConfig.default()
         self.session_token = session_token
+        self._snapshot_cache: SyncSnapshot | None = None
 
     def _headers(self) -> dict[str, str]:
         if not self.session_token:
@@ -52,9 +54,10 @@ class DidaV2Client:
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read().decode("utf-8", "replace")
-                if not raw:
-                    return {}
-                return json.loads(raw)
+                result = {} if not raw else json.loads(raw)
+                if method.upper() != "GET":
+                    self._snapshot_cache = None
+                return result
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
             raise DidaV2Error(f"HTTP {exc.code} from {method.upper()} {endpoint}: {body[:300]}") from exc
@@ -65,16 +68,14 @@ class DidaV2Client:
     def full_sync(self) -> Any:
         return self.request("GET", "/batch/check/0")
 
-    def list_tasks(self) -> list[dict[str, Any]]:
-        sync = self.full_sync()
-        if not isinstance(sync, dict):
-            return []
-        sync_task_bean = sync.get("syncTaskBean")
-        if isinstance(sync_task_bean, dict) and isinstance(sync_task_bean.get("update"), list):
-            return [task for task in sync_task_bean["update"] if isinstance(task, dict)]
-        if isinstance(sync.get("tasks"), list):
-            return [task for task in sync["tasks"] if isinstance(task, dict)]
-        return []
+    def get_snapshot(self, *, refresh: bool = False) -> SyncSnapshot:
+        if refresh or self._snapshot_cache is None:
+            self._snapshot_cache = SyncSnapshot.from_payload(self.full_sync())
+        return self._snapshot_cache
+
+    def list_tasks(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
+        current = snapshot or self.get_snapshot()
+        return [dict(task) for task in current.tasks]
 
     def get_task(self, task_id: str, *, project_id: str | None = None) -> dict[str, Any]:
         for task in self.list_tasks():
@@ -157,10 +158,9 @@ class DidaV2Client:
     def unset_task_parent(self, task_id: str, *, project_id: str, old_parent_id: str) -> Any:
         return self.batch_task_parents([{"taskId": task_id, "projectId": project_id, "oldParentId": old_parent_id}])
 
-    def list_tags(self) -> list[dict[str, Any]]:
-        sync = self.full_sync()
-        tags = sync.get("tags", []) if isinstance(sync, dict) else []
-        return [tag for tag in tags if isinstance(tag, dict)]
+    def list_tags(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
+        current = snapshot or self.get_snapshot()
+        return [dict(tag) for tag in current.tags]
 
     def batch_tags(self, *, add: list[dict[str, Any]] | None = None, update: list[dict[str, Any]] | None = None) -> Any:
         return self.request("POST", "/batch/tag", payload={"add": add or [], "update": update or []})
@@ -238,10 +238,9 @@ class DidaV2Client:
     def delete_column(self, project_id: str, column_id: str) -> Any:
         return self.batch_columns(project_id=project_id, delete=[column_id])
 
-    def list_project_folders(self) -> list[dict[str, Any]]:
-        sync = self.full_sync()
-        folders = sync.get("projectGroups", []) if isinstance(sync, dict) else []
-        return [folder for folder in folders if isinstance(folder, dict)]
+    def list_project_folders(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
+        current = snapshot or self.get_snapshot()
+        return [dict(folder) for folder in current.project_groups]
 
     def batch_project_folders(
         self,
@@ -273,10 +272,9 @@ class DidaV2Client:
     def delete_project_folder(self, folder_id: str) -> Any:
         return self.batch_project_folders(delete=[folder_id])
 
-    def list_projects(self) -> list[dict[str, Any]]:
-        sync = self.full_sync()
-        projects = sync.get("projectProfiles", []) if isinstance(sync, dict) else []
-        return [project for project in projects if isinstance(project, dict)]
+    def list_projects(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
+        current = snapshot or self.get_snapshot()
+        return [dict(project) for project in current.projects]
 
     def batch_projects(self, *, update: list[dict[str, Any]]) -> Any:
         return self.request("POST", "/batch/project", payload={"update": update})
