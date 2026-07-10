@@ -73,6 +73,22 @@ class DidaV2Client:
             self._snapshot_cache = SyncSnapshot.from_payload(self.full_sync())
         return self._snapshot_cache
 
+    def list_filters(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
+        current = snapshot or self.get_snapshot()
+        return [dict(item) for item in current.filters]
+
+    def get_filter(self, filter_id: str, *, snapshot: SyncSnapshot | None = None) -> dict[str, Any]:
+        matches = [item for item in self.list_filters(snapshot=snapshot) if item.get("id") == filter_id]
+        if not matches:
+            raise DidaV2Error(f"Saved filter not found: {filter_id}")
+        return matches[0]
+
+    def find_filter(self, name: str, *, snapshot: SyncSnapshot | None = None) -> dict[str, Any] | None:
+        matches = [item for item in self.list_filters(snapshot=snapshot) if item.get("name") == name]
+        if len(matches) > 1:
+            raise DidaV2Error(f"Saved filter name is ambiguous: {name}")
+        return matches[0] if matches else None
+
     def list_tasks(self, *, snapshot: SyncSnapshot | None = None) -> list[dict[str, Any]]:
         current = snapshot or self.get_snapshot()
         return [dict(task) for task in current.tasks]

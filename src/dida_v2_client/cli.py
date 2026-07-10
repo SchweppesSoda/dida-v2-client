@@ -7,6 +7,8 @@ from typing import Any
 
 from .auth import resolve_session_token
 from .config import DidaConfig
+from .datetime_utils import parse_dida_datetime
+from .filters import SavedFilterEvaluator
 from .query import DidaV2QueryService
 from .transport import DidaV2Client, DidaV2Error
 from .verify import DidaV2Verifier
@@ -19,6 +21,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="resource", required=True)
 
     sub.add_parser("status")
+
+    saved_filters = sub.add_parser("filters")
+    saved_filter_sub = saved_filters.add_subparsers(dest="action", required=True)
+    saved_filter_sub.add_parser("list")
+    for action in ("get", "explain", "run"):
+        command = saved_filter_sub.add_parser(action)
+        selector = command.add_mutually_exclusive_group(required=True)
+        selector.add_argument("--id", dest="filter_id")
+        selector.add_argument("--name", dest="filter_name")
+        if action == "run":
+            command.add_argument("--timezone")
+            command.add_argument("--now")
 
     tags = sub.add_parser("tags")
     tag_sub = tags.add_subparsers(dest="action", required=True)
@@ -340,6 +354,44 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         client = client_from_args(args)
+        if args.resource == "filters":
+            if args.action == "list":
+                print(json.dumps(client.list_filters(), ensure_ascii=False, indent=2))
+                return 0
+            selector = args.filter_id or args.filter_name
+            if args.action == "run":
+                kwargs: dict[str, Any] = {}
+                if args.timezone:
+                    kwargs["timezone"] = args.timezone
+                if args.now:
+                    kwargs["now"] = parse_dida_datetime(
+                        args.now,
+                        assume_timezone=args.timezone or "Asia/Shanghai",
+                    )
+                print(
+                    json.dumps(
+                        DidaV2QueryService(client).query_saved_filter(selector, **kwargs),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 0
+            saved_filter = client.get_filter(args.filter_id) if args.filter_id else client.find_filter(args.filter_name)
+            if saved_filter is None:
+                raise DidaV2Error(f"Saved filter not found: {selector}")
+            if args.action == "get":
+                print(json.dumps(saved_filter, ensure_ascii=False, indent=2))
+                return 0
+            evaluator = SavedFilterEvaluator()
+            parsed = evaluator.parse(saved_filter.get("rule") or {})
+            print(
+                json.dumps(
+                    {"filter": saved_filter, "parsed_rule": parsed, "explanation": evaluator.explain(parsed)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
         if args.resource == "query":
             query_service = DidaV2QueryService(client)
             if args.action == "workspace":

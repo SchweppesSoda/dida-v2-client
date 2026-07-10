@@ -3,8 +3,12 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone as dt_timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .datetime_utils import parse_dida_datetime
+from .filters import FilterContext, SavedFilterEvaluator
+from .snapshot import SyncSnapshot
+from .transport import DidaV2Error
 
 
 class DidaV2QueryService:
@@ -241,6 +245,79 @@ class DidaV2QueryService:
             "low": buckets["low"][:limit],
             "none": buckets["none"][:limit],
             "counts": {key: len(value) for key, value in buckets.items()},
+        }
+
+    def query_saved_filter(
+        self,
+        name_or_id: str,
+        *,
+        now: datetime | None = None,
+        timezone: str | None = None,
+    ) -> dict[str, Any]:
+        get_snapshot = getattr(self.client, "get_snapshot", None)
+        if not callable(get_snapshot):
+            raise DidaV2Error("Saved-filter queries require a client with get_snapshot()")
+        snapshot = get_snapshot()
+        if not isinstance(snapshot, SyncSnapshot):
+            raise DidaV2Error("get_snapshot() returned an unsupported snapshot type")
+        filters = [dict(item) for item in snapshot.filters]
+        matches = [item for item in filters if item.get("id") == name_or_id or item.get("name") == name_or_id]
+        if not matches:
+            raise DidaV2Error(f"Saved filter not found: {name_or_id}")
+        if len(matches) > 1:
+            raise DidaV2Error(f"Saved filter is ambiguous: {name_or_id}")
+        saved_filter = matches[0]
+        timezone_name = timezone or "Asia/Shanghai"
+        evaluated_at = now or datetime.now(ZoneInfo(timezone_name))
+        evaluator = SavedFilterEvaluator()
+        parsed = evaluator.parse(saved_filter.get("rule") or {})
+        projects = [dict(item) for item in snapshot.projects]
+        folders = [dict(item) for item in snapshot.project_groups]
+        project_by_id: dict[str, dict[str, Any]] = {}
+        folder_by_id: dict[str, dict[str, Any]] = {}
+        for item in projects:
+            item_id = item.get("id")
+            if isinstance(item_id, str):
+                project_by_id[item_id] = item
+        for item in folders:
+            item_id = item.get("id")
+            if isinstance(item_id, str):
+                folder_by_id[item_id] = item
+        context = FilterContext(
+            now=evaluated_at,
+            timezone=timezone_name,
+            project_by_id=project_by_id,
+            folder_by_id=folder_by_id,
+        )
+        items = evaluator.filter_tasks([dict(item) for item in snapshot.tasks], parsed, context)
+        enriched: list[dict[str, Any]] = []
+        for task in items:
+            row = dict(task)
+            project_id = task.get("projectId")
+            project = project_by_id.get(project_id, {}) if isinstance(project_id, str) else {}
+            group_id = project.get("groupId")
+            folder = folder_by_id.get(group_id, {}) if isinstance(group_id, str) else {}
+            row["project_name"] = project.get("name")
+            row["folder_name"] = folder.get("name")
+            enriched.append(row)
+        raw_sort_option = saved_filter.get("sortOption")
+        sort_option: dict[str, Any] = dict(raw_sort_option) if isinstance(raw_sort_option, dict) else {}
+        order_by = sort_option.get("orderBy")
+        if order_by:
+            enriched.sort(
+                key=lambda item: self._sort_value(item, str(order_by)),
+                reverse=str(sort_option.get("order") or "").lower() == "desc",
+            )
+        return {
+            "filter": saved_filter,
+            "parsed_rule": parsed,
+            "explanation": evaluator.explain(parsed),
+            "count": len(enriched),
+            "items": enriched,
+            "grouping": saved_filter.get("sortType") or sort_option.get("groupBy"),
+            "sort": dict(sort_option),
+            "timezone": timezone_name,
+            "evaluated_at": evaluated_at.isoformat(),
         }
 
     def _folders(self) -> list[dict[str, Any]]:
