@@ -8,7 +8,7 @@ Small, conservative Dida365-first private v2 client.
 - TickTick international compatibility is a profile switch; it is mostly the same API shape with different domains.
 - We are moving toward **v2-first** coverage, while keeping write operations safe by default.
 - Prefer official v1 / `dida` CLI only as a fallback while the v2 client is still gaining typed wrappers and live verification.
-- Authentication defaults to direct local web sign-on (`DIDA_EMAIL`/`DIDA_PASSWORD`) and falls back to Selenium form automation, then raw local `t` session token env vars. Direct sign-on uses a stable live-verified 24-hex `X-Device` id by default; override with `DIDA_DEVICE_ID` only if needed.
+- Authentication resolves in session-first order: explicitly supplied token, optional OS credential-vault session, profile-specific local session env, direct local web sign-on, then Selenium fallback. All accepted profile aliases are canonicalized before selecting keyring entries, environment variables, credentials, or device ids, so Dida and TickTick auth material cannot cross profiles. Direct sign-on uses a stable live-verified 24-hex `X-Device` id by default; override with the canonical profile's device-id environment variable only if needed.
 - CLI write operations default to dry-run; pass `--apply` to write.
 
 ## Reference repositories and acknowledgements
@@ -36,11 +36,27 @@ web: https://ticktick.com
 v2:  https://api.ticktick.com/api/v2
 ```
 
+## Installation
+
+```bash
+uv pip install .
+uv pip install '.[secure-store]'  # optional OS keychain / credential vault
+uv pip install '.[headless]'      # optional Selenium fallback
+```
+
+The `secure-store` extra uses `keyring`; it does not create a plaintext session-token file.
+
 ## CLI examples
 
 ```bash
 # session / sync; credentials stay in local env/secret store, not chat
 DIDA_EMAIL='<local-email>' DIDA_PASSWORD='<local-password>' uv run dida-v2 status
+
+# validate and store a session in the OS credential vault
+DIDA_EMAIL='<local-email>' DIDA_PASSWORD='<local-password>' uv run dida-v2 auth login
+uv run dida-v2 auth status
+uv run dida-v2 auth refresh
+uv run dida-v2 auth logout
 
 # saved Web UI filters / smart lists
 uv run dida-v2 filters list
@@ -124,11 +140,11 @@ Do not paste session tokens, passwords, or cookies into chat. Prefer direct loca
 
 ## Current scope
 
-Implemented through v0.2.0:
+Implemented through v0.2.1:
 
-- config profiles: `dida` and `ticktick` (`cn`/`global` remain compatibility aliases)
+- config profiles: `dida` and `ticktick`; CLI/API share aliases `dida365`/`cn`/`china` and `global`/`intl`/`international`
 - v2 transport with cookie auth
-- session/account: `user_status()`, `user_profile()`, `user_preferences()`
+- session/account: explicit/store/env/direct/Selenium session-first resolution, optional `KeyringSessionStore`, `auth login/status/refresh/logout`, `user_status()`, `user_profile()`, and `user_preferences()`; all profile aliases are canonicalized before auth-material selection, new sessions are validated before storage, refresh failures preserve the old session, only structured HTTP 401 or status-less `user_not_sign_on` failures remove stored sessions, and auth CLI failures use fixed secret-free output
 - sync: `full_sync()`, recursively immutable `SyncSnapshot`, deep-copy return boundaries, and a cache capped at 30 seconds; `config`/`session_token` are read-only and must be replaced together with `set_identity()`, request identities are captured atomically, only the newest eligible fetch may commit, explicit refresh supersedes older fetches, and write attempts or identity changes invalidate stale generations
 - saved Web UI filters: `list_filters()`, `get_filter()`, `find_filter()`, `SavedFilterEvaluator`, and `filters list/get/explain/run`
 - tasks: `list_tasks()`, `get_task()`, `batch_tasks()`, `batch_errors()`, `ensure_batch_ok()`, `create_task()`, `update_task()`, `delete_task()`, `complete_task()`, `reopen_task()`, `abandon_task()`, `move_tasks()`, `move_task()`, `batch_task_parents()`, `set_task_parent()`, `unset_task_parent()`, `list_closed_tasks()`, `list_trash_tasks()`
@@ -149,7 +165,6 @@ See `docs/v2-capability-matrix.md` for migration status and remaining v2-first w
 
 ## Next likely additions
 
-- local session cache/keychain integration for direct sign-on tokens
 - live-backed verification harness using a disposable project/list
 - cascade-safe move helpers for parent tasks and their children
 - live sandbox tests using a disposable project/list

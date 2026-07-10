@@ -6,21 +6,30 @@ import sys
 from typing import Any
 from zoneinfo import ZoneInfoNotFoundError
 
-from .auth import resolve_session_token
+from .auth import DidaAuthError, KeyringSessionStore, SessionStore, direct_signon_login, resolve_session_token
 from .config import DidaConfig
 from .filters import SavedFilterEvaluator
 from .query import DidaV2QueryService
-from .transport import DidaV2Client, DidaV2Error
+from .transport import DidaV2Client, DidaV2Error, DidaV2HTTPError
 from .verify import DidaV2Verifier
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dida-v2")
-    parser.add_argument("--profile", choices=["dida", "ticktick", "cn", "global"], default="dida")
-    parser.add_argument("--no-headless", action="store_true", help="Skip headless login and use session-token env fallback only")
+    parser.add_argument("--profile", choices=DidaConfig.PROFILE_ALIASES, default="dida")
+    parser.add_argument(
+        "--no-headless",
+        action="store_true",
+        help="Skip direct/Selenium login; use secure-store or profile-specific session env only",
+    )
     sub = parser.add_subparsers(dest="resource", required=True)
 
     sub.add_parser("status")
+
+    auth = sub.add_parser("auth")
+    auth_sub = auth.add_subparsers(dest="action", required=True)
+    for action in ("login", "status", "refresh", "logout"):
+        auth_sub.add_parser(action)
 
     saved_filters = sub.add_parser("filters")
     saved_filter_sub = saved_filters.add_subparsers(dest="action", required=True)
@@ -269,9 +278,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def session_store_from_args(args: argparse.Namespace, *, required: bool = False) -> SessionStore | None:
+    try:
+        return KeyringSessionStore()
+    except DidaAuthError:
+        if required:
+            raise
+        return None
+
+
 def client_from_args(args: argparse.Namespace) -> DidaV2Client:
     cfg = DidaConfig.for_profile(args.profile)
-    token = resolve_session_token(profile=args.profile, headless=not args.no_headless)
+    store = session_store_from_args(args, required=False)
+    token = resolve_session_token(
+        profile=args.profile,
+        headless=not args.no_headless,
+        session_store=store,
+    )
     return DidaV2Client(cfg, session_token=token)
 
 
@@ -349,10 +372,53 @@ def _noneish(value: str) -> str | None:
     return None if value.lower() in {"none", "null", "-"} else value
 
 
+def _run_auth(args: argparse.Namespace) -> int:
+    config = DidaConfig.for_profile(args.profile)
+    profile = config.profile
+    store = session_store_from_args(args, required=True)
+    if store is None:  # pragma: no cover - required=True raises first
+        raise DidaAuthError("OS secure session storage is unavailable.")
+    if args.action in {"login", "refresh"}:
+        token = direct_signon_login(profile=profile, config=config)
+        DidaV2Client(config, session_token=token).user_status()
+        store.set(profile, token)
+        print(json.dumps({"profile": profile, "stored": True, "valid": True}, ensure_ascii=False))
+        return 0
+    if args.action == "status":
+        token = store.get(profile)
+        if not token:
+            print(json.dumps({"profile": profile, "stored": False, "valid": False}, ensure_ascii=False))
+            return 1
+        try:
+            DidaV2Client(config, session_token=token).user_status()
+        except DidaV2HTTPError as exc:
+            definitively_invalid = exc.status == 401 or (
+                exc.status is None and exc.error_code == "user_not_sign_on"
+            )
+            if not definitively_invalid:
+                raise
+            store.delete(profile)
+            print(json.dumps({"profile": profile, "stored": False, "valid": False}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"profile": profile, "stored": True, "valid": True}, ensure_ascii=False))
+        return 0
+    if args.action == "logout":
+        store.delete(profile)
+        print(json.dumps({"profile": profile, "stored": False, "valid": False}, ensure_ascii=False))
+        return 0
+    raise DidaAuthError("Unsupported auth action.")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.resource == "auth":
+            try:
+                return _run_auth(args)
+            except Exception:
+                print("ERROR: Authentication operation failed.", file=sys.stderr)
+                return 2
         client = client_from_args(args)
         if args.resource == "filters":
             if args.action == "list":

@@ -18,6 +18,25 @@ class DidaV2Error(RuntimeError):
     pass
 
 
+class DidaV2HTTPError(DidaV2Error):
+    """Structured HTTP failure with a secret-free user-facing message."""
+
+    def __init__(
+        self,
+        status: int | None,
+        method: str,
+        endpoint: str,
+        *,
+        error_code: str | None = None,
+    ):
+        self.status = status
+        self.method = method.upper()
+        self.endpoint = endpoint
+        self.error_code = error_code
+        status_text = "unknown" if status is None else str(status)
+        super().__init__(f"HTTP {status_text} from {self.method} {endpoint}")
+
+
 class DidaV2Client:
     def __init__(
         self,
@@ -148,8 +167,25 @@ class DidaV2Client:
                 raw = resp.read().decode("utf-8", "replace")
                 return {} if not raw else json.loads(raw)
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
-            raise DidaV2Error(f"HTTP {exc.code} from {method_upper} {endpoint}: {body[:300]}") from exc
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            error_code = None
+            try:
+                parsed = json.loads(body) if body else {}
+                if isinstance(parsed, dict):
+                    for key in ("errorCode", "errorId", "error"):
+                        value = parsed.get(key)
+                        if isinstance(value, str) and value:
+                            error_code = value
+                            break
+            except (json.JSONDecodeError, UnicodeError):
+                pass
+            raise DidaV2HTTPError(exc.code, method_upper, endpoint, error_code=error_code) from None
+        except (urllib.error.URLError, OSError):
+            raise DidaV2Error(f"Network request failed for {method_upper} {endpoint}") from None
         finally:
             if method_upper != "GET":
                 self._invalidate_snapshot()

@@ -1,10 +1,13 @@
+import io
+import traceback
+import urllib.error
 from threading import Event, Thread
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from dida_v2_client.config import DidaConfig
-from dida_v2_client.transport import DidaV2Client, DidaV2Error
+from dida_v2_client.transport import DidaV2Client, DidaV2Error, DidaV2HTTPError
 from dida_v2_client.version import USER_AGENT
 
 
@@ -91,6 +94,55 @@ def test_identity_fields_require_atomic_replacement():
     client.set_identity(DidaConfig.for_profile("ticktick"), "TOKEN_B")
     assert client.config.profile == "ticktick"
     assert client.session_token == "TOKEN_B"
+
+
+def test_request_exposes_structured_http_status_without_response_secrets(monkeypatch):
+    def fake_urlopen(req, timeout):
+        body = b'{"errorCode":"user_not_sign_on","message":"TOKEN_SENTINEL"}'
+        raise urllib.error.HTTPError(req.full_url, 503, "unavailable", {}, io.BytesIO(body))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = DidaV2Client(DidaConfig.default(), session_token="TOKEN_SENTINEL")
+
+    with pytest.raises(DidaV2HTTPError) as excinfo:
+        client.user_status()
+    assert excinfo.value.status == 503
+    assert excinfo.value.error_code == "user_not_sign_on"
+    assert "TOKEN_SENTINEL" not in str(excinfo.value)
+    formatted = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
+    assert "TOKEN_SENTINEL" not in formatted
+
+
+def test_request_sanitizes_network_failure_reason(monkeypatch):
+    def fake_urlopen(req, timeout):
+        raise urllib.error.URLError("network echoed TOKEN_SENTINEL")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = DidaV2Client(DidaConfig.default(), session_token="TOKEN_SENTINEL")
+
+    with pytest.raises(DidaV2Error) as excinfo:
+        client.user_status()
+    assert "TOKEN_SENTINEL" not in str(excinfo.value)
+    formatted = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
+    assert "TOKEN_SENTINEL" not in formatted
+
+
+def test_request_sanitizes_http_error_body_read_failure(monkeypatch):
+    class BrokenHTTPError(urllib.error.HTTPError):
+        def read(self, *args, **kwargs):
+            raise OSError("body read echoed TOKEN_SENTINEL")
+
+    def fake_urlopen(req, timeout):
+        raise BrokenHTTPError(req.full_url, 503, "TOKEN_SENTINEL", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = DidaV2Client(DidaConfig.default(), session_token="TOKEN_SENTINEL")
+
+    with pytest.raises(DidaV2HTTPError) as excinfo:
+        client.user_status()
+    assert excinfo.value.status == 503
+    formatted = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
+    assert "TOKEN_SENTINEL" not in formatted
 
 
 def test_requires_session_token():

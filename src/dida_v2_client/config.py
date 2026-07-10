@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 
 @dataclass(frozen=True)
 class DidaConfig:
+    PROFILE_ALIASES: ClassVar[tuple[str, ...]] = (
+        "dida",
+        "dida365",
+        "cn",
+        "china",
+        "ticktick",
+        "global",
+        "intl",
+        "international",
+    )
+
     profile: str
     web_origin: str
     api_v2_base: str

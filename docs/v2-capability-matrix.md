@@ -21,7 +21,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 - Writes must default to dry-run in CLI.
 - `--apply` is required for writes.
 - Do not log or print session cookies/tokens.
-- Prefer local headless/cookie auth; raw `t` cookie env vars are local fallback only.
+- Prefer OS credential-vault sessions, then profile-specific local session env; direct sign-on and Selenium are fallback acquisition paths.
 - When replacing a v1 workflow, add read-back verification before trusting the write.
 - Typed batch helpers must inspect `id2error`, `errorId`, `errorCode`, and `error` in responses.
 
@@ -30,6 +30,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 | Area | Capability | Endpoint(s) | Client methods | CLI |
 | --- | --- | --- | --- | --- |
 | Auth/session | account status | `GET /user/status` | `user_status()` | `status` |
+| Auth/session | session-first resolution and optional OS credential-vault storage | local credential vault + session env + sign-on fallbacks | `SessionStore`, `KeyringSessionStore`, `resolve_session_token()` | `auth login/status/refresh/logout` |
 | Account | profile | `GET /user/profile` | `user_profile()` | `stats profile` |
 | Account | preferences/settings | `GET /user/preferences/settings?includeWeb=true` | `user_preferences()` | `stats preferences` |
 | Sync | full sync and bounded reusable operation snapshot | `GET /batch/check/0` | `full_sync()`, `get_snapshot()`, recursively immutable `SyncSnapshot`; read-only identity fields plus atomic `set_identity()`, newest-fetch commit ordering, TTL capped at 30 seconds, refresh supersession, and generation invalidation on writes/identity replacement | used internally |
@@ -71,7 +72,11 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 1. **Authentication**
    - v2 requires the logged-in web session cookie `t`.
    - Open API bearer tokens do not authorize v2 endpoints.
-   - Direct `POST /user/signon?wc=true&remember=true` is now wrapped for local env credentials and should be preferred over Selenium form automation.
+   - Direct `POST /user/signon?wc=true&remember=true` is wrapped for local env credentials and is used only after explicit token, OS credential-vault session, and profile-specific session env resolution.
+   - All public profile aliases are canonicalized before selecting keyring usernames, session/credential/device environment variables, or sign-on targets; Dida and TickTick auth material remains isolated.
+   - `auth login`/`refresh` validate a new session with `/user/status` before storing it. Refresh failures preserve the old stored token; `auth status` removes a token only for structured HTTP 401 or status-less `user_not_sign_on`, not 403/429/5xx/network failures.
+   - Transport HTTP failures carry structured status/error-code fields while their user-facing messages omit response bodies. Auth CLI failures use fixed output, never echo server/network exception text, and suppress hostile underlying exception causes so formatted tracebacks remain secret-free.
+   - `KeyringSessionStore` uses the optional `secure-store` extra and never falls back to a plaintext token file.
    - Selenium fallback includes Dida365 `#emailOrPhone`, but form login can still be gated by captcha/Turnstile and may not issue `t`.
 
 2. **Task creation and subtasks**
@@ -108,7 +113,7 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 
 | Area | Evidence | Status |
 | --- | --- | --- |
-| Direct web sign-on | `POST /api/v2/user/signon?wc=true&remember=true` live-verified 2026-07-09 for read-only v2 access; requires a web-like 24-hex `X-Device.id` (arbitrary IDs can produce misleading `username_password_not_match`) | Wrapped in `direct_signon_login()` and used by default by `resolve_session_token()` when local env credentials are present; next: cache/keychain integration |
+| Direct web sign-on | `POST /api/v2/user/signon?wc=true&remember=true` live-verified 2026-07-09 for read-only v2 access; requires a web-like 24-hex `X-Device.id` (arbitrary IDs can produce misleading `username_password_not_match`) | Wrapped in `direct_signon_login()` behind session-first resolution; validated sessions can be stored through optional `KeyringSessionStore` |
 | Comments | v1 CLI/Open API supports comments; no confirmed v2 endpoint in inspected sources | Keep v1 for now |
 | Attachments | `batch/task` payload supports `addAttachments`/`updateAttachments`/`deleteAttachments`; no high-level typed wrapper yet | Generic payload supported in client, CLI not yet exposed |
 | Calendar integrations | Public web bundle exposes site/calendar paths, not confirmed task-app v2 endpoints | Not wrapped |
@@ -116,27 +121,22 @@ This project is moving toward v2-first Dida365/TickTick automation. The default 
 
 ## Remaining v2-first work
 
-1. **Auth hardening**
-   - Add session-first resolution and optional OS credential-vault storage through a lazy `keyring` extra.
-   - Validate cached sessions with `/user/status` and remove only confirmed 401/`user_not_sign_on` entries.
-   - Avoid chat-pasted cookies and plaintext session files entirely.
-
-2. **Safer high-level task builders**
+1. **Safer high-level task builders**
    - Add validated payload builders for dates, reminders, repeat rules, and checklist items.
    - Keep reminders on v1 until a v2 live sandbox proves reliable behavior.
 
-3. **Write verification**
+2. **Write verification**
    - Dedicated verified commands now cover task moves, parent set/unset, and project folder assignment.
    - Next: make selected `--apply` commands opt into these verified paths by default once auth/cookie cache is reliable.
    - Keep detecting `id2error` and non-empty error maps for every batch write.
 
-4. **Coverage expansion after endpoint verification**
+3. **Coverage expansion after endpoint verification**
    - Attachments high-level helpers if `batch/task` attachment fields are live-verified.
    - Comments only if v2 endpoints are confirmed.
    - Calendar/timezone/settings writes only after live endpoint verification.
    - Any UI-only feature must be proven against v2 before adding a write wrapper.
 
-5. **Migration away from v1**
+4. **Migration away from v1**
    - Keep v1 as fallback until v2 auth and write verification are reliable.
    - Prefer v2 reads now.
    - Move routine Hermes workflows to v2 one workflow at a time with regression tests.
