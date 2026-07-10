@@ -11,6 +11,15 @@ Small, conservative Dida365-first private v2 client.
 - Authentication defaults to direct local web sign-on (`DIDA_EMAIL`/`DIDA_PASSWORD`) and falls back to Selenium form automation, then raw local `t` session token env vars. Direct sign-on uses a stable live-verified 24-hex `X-Device` id by default; override with `DIDA_DEVICE_ID` only if needed.
 - CLI write operations default to dry-run; pass `--apply` to write.
 
+## Reference repositories and acknowledgements
+
+This project is an independent Dida365-first implementation. Its endpoint inventory and design were informed by these public repositories:
+
+- [`KpihX/tick-mcp`](https://github.com/KpihX/tick-mcp) — primary reference for private v2 endpoint evidence, tag/column/project/task batch operations, and the higher-level query/verified-action design.
+- [`OliverStoll/ticktick-api-v2`](https://github.com/OliverStoll/ticktick-api-v2) — reference for TickTick v2 cookie/Selenium authentication patterns and task, habit, focus, and pomodoro reads.
+
+The upstream repositories are not bundled as runtime dependencies. This client adapts the observed API behavior for Dida365 China endpoints, adds its own safety defaults, tests, CLI, and verification layer, and remains unofficial and unaffiliated with Dida365/TickTick or the referenced projects.
+
 ## Endpoints
 
 Default Dida365 profile:
