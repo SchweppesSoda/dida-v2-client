@@ -1,4 +1,4 @@
-.venv/
+.venv
 # Machine-local interpreter choice; do not commit personal Python paths.
 .python-version
 uv.toml

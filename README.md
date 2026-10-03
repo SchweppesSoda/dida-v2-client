@@ -108,8 +108,57 @@ different Python versions, supplied via `DIDA_TEST_UV_PYTHON` and
 `DIDA_TEST_UV_ALTERNATE_PYTHON`; otherwise only those integration tests skip.
 CI supplies both interpreters and runs them on Python 3.9 and the latest stable
 3.x, including venv creation/rebuilding, temporary entry retargeting, missing
-pins, project-external invocation, and secure-store retention. No test removes
-a real interpreter or accesses a real account.
+pins, project-external invocation, secure-store retention, and external-venv
+symlink/target preservation across version rebuilds. No test removes a real
+interpreter or accesses a real account.
+
+### Cloud-synced checkouts: keep the venv outside syncing folders
+
+On affected macOS/iCloud filesystems (such as synced Documents folders), newly
+created `.pth` files can acquire hidden flags. CPython 3.14 deliberately ignores
+hidden `.pth` files, which can prevent an editable install from finding this
+project's source. The real CLI can then fail with `ModuleNotFoundError` even
+while pytest passes, because pytest adds `src` to its import path. This is local
+filesystem behavior, not a runtime-source bug; do not disable Python's security
+check or repeatedly clear file flags. See [uv#9902](https://github.com/astral-sh/uv/issues/9902)
+and [CPython#148121](https://github.com/python/cpython/issues/148121).
+
+Prefer keeping the checkout outside iCloud/cloud-sync folders. If the code must
+stay there, keep the ordinary project `.venv` entry as a symlink to a
+project-specific environment in a non-synced user-data directory. Use a unique
+`ENV_DIR` for each checkout and verify that its location is not synced.
+
+For a fresh setup, select Python first (including the local Homebrew pin/config
+above if used), then run this from the checkout. The guard also detects broken
+links: if either path already exists, stop and preserve the existing venv/link
+before proceeding; do not overwrite or delete it blindly.
+
+```bash
+PROJECT="$PWD"
+ENV_DIR="$HOME/.local/share/dida-v2-client/venvs/my-checkout"
+if [ -e "$PROJECT/.venv" ] || [ -L "$PROJECT/.venv" ] ||
+   [ -e "$ENV_DIR" ] || [ -L "$ENV_DIR" ]; then
+    printf '%s\n' 'Preserve the existing .venv/link or ENV_DIR before proceeding.' >&2
+else
+    mkdir -p "$(dirname "$ENV_DIR")" &&
+        UV_PROJECT_ENVIRONMENT="$ENV_DIR" uv sync --project "$PROJECT" --locked --extra secure-store &&
+        ln -s "$ENV_DIR" "$PROJECT/.venv"
+fi
+```
+
+`UV_PROJECT_ENVIRONMENT` is only for that initial sync; do not export it for
+normal runs. Native uv follows the project's `.venv` link, so the canonical
+invocation is unchanged, with no extra daily flags:
+
+```bash
+uv run --project "$PROJECT" --locked --extra secure-store dida-v2 --help
+```
+
+Native integration tests verify the link and target survive interpreter-version
+rebuilds while core imports, `keyring`, and CLI help keep working. This covers the
+tested native uv behavior, not every cloud provider or future uv release. No
+runner, service, Cron job, shared application runtime, or extra Python install
+is needed for this layout.
 
 ## CLI examples
 
