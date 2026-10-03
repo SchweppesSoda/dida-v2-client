@@ -121,6 +121,47 @@ def assert_runtime(result, identity):
     assert json.loads(result.stdout) == identity
 
 
+@pytest.mark.parametrize("entry_kind", ["file", "symlink"])
+def test_gitignore_ignores_venv_file_or_symlink(tmp_path, request, entry_kind):
+    if entry_kind == "symlink":
+        # Share the native tests' explicit prerequisites, not ordinary Windows runs.
+        request.getfixturevalue("uv_project")
+    git = shutil.which("git")
+    if not git:
+        pytest.skip("Git-ignore regression needs git")
+    assert git is not None
+    source = Path(__file__).resolve().parents[1]
+    repo = tmp_path / "git-project"
+    repo.mkdir()
+    shutil.copy2(source / ".gitignore", repo / ".gitignore")
+    home = tmp_path / "git-home"
+    home.mkdir()
+    env = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    subprocess.run(
+        [git, "init", "--quiet"], cwd=repo, env=env,
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    entry = repo / ".venv"
+    if entry_kind == "symlink":
+        target = tmp_path / "git-external-venv"
+        target.mkdir()
+        entry.symlink_to(target, target_is_directory=True)
+    else:
+        entry.write_text("external venv placeholder\n", encoding="utf-8")
+    result = subprocess.run(
+        [git, "status", "--short", "--untracked-files=all", "--", ".venv"],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=30, check=True,
+    )
+    assert not result.stdout, result.stdout
+
+
 def test_first_sync_and_external_project_cli_keep_secure_store(uv_project):
     project, command, primary, _, primary_id, _ = uv_project
     pin(project, command, primary)
@@ -158,6 +199,39 @@ def test_stable_entry_retarget_rebuilds_and_retains_secure_store(uv_project, tmp
     entry.symlink_to(alternate)
     assert_runtime(run(project, command, "python", "-c", SMOKE), alternate_id)
     assert (project / ".python-version").read_text().strip() == str(entry)
+
+
+def test_external_venv_symlink_survives_stable_entry_rebuilds(uv_project, tmp_path):
+    project, command, primary, alternate, primary_id, alternate_id = uv_project
+    external = tmp_path / "external-venv"
+    link = project / ".venv"
+    entry = tmp_path / "python3"
+    try:
+        command("venv", "--python", primary, "--no-python-downloads", str(external))
+        link.symlink_to(external, target_is_directory=True)
+        entry.symlink_to(primary)
+        pin(project, command, entry)
+        for index, (python, identity) in enumerate((
+            (primary, primary_id), (alternate, alternate_id), (primary, primary_id),
+        )):
+            if index:
+                entry.unlink()  # Retarget only our temporary stable entry.
+                entry.symlink_to(python)
+            assert_runtime(run(project, command, "python", "-c", SMOKE), identity)
+            help_result = run(project, command, "dida-v2", "--help")
+            assert "usage: dida-v2" in help_result.stdout
+            assert "--profile" in help_result.stdout
+            assert "--no-headless" in help_result.stdout
+            assert link.is_symlink()
+            assert link.resolve(strict=True) == external.resolve(strict=True)
+            assert (project / ".python-version").read_text().strip() == str(entry)
+    finally:
+        if link.is_symlink():
+            link.unlink()
+        if entry.is_symlink():
+            entry.unlink()
+        if external.exists():
+            shutil.rmtree(external)
 
 
 @pytest.mark.parametrize("existing_venv", [False, True])
