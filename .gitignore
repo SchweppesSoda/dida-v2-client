@@ -1,4 +1,7 @@
 .venv/
+# Machine-local interpreter choice; do not commit personal Python paths.
+.python-version
+uv.toml
 .pytest_cache/
 __pycache__/
 *.py[cod]

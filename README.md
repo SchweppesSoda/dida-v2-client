@@ -47,6 +47,70 @@ uv pip install '.[headless]'      # optional Selenium fallback
 
 The `secure-store` extra uses `keyring`; it does not create a plaintext session-token file.
 
+For a checkout with `uv.lock`, use `uv sync --locked` and `uv run --locked`.
+Select optional extras on every sync/run that needs them: uv may remove unselected
+extras, including `keyring`, when it synchronizes or rebuilds the environment.
+Linux, Windows, and uv-managed Python remain supported; the following policy is
+optional and specific to Macs that already have Homebrew Python installed.
+
+### macOS: reuse Homebrew Python
+
+Reuse the base interpreter, not its global site-packages: dependencies still live
+in the project's isolated `.venv`. This does not remove the Python requirement
+or install/upgrade Homebrew Python for you.
+
+From the cloned project directory, pin Homebrew's stable entry (not a versioned
+Cellar path). These two files are machine-local and ignored by Git:
+
+```bash
+PROJECT="$PWD"
+uv python pin --project "$PROJECT" --no-managed-python --no-python-downloads /opt/homebrew/bin/python3
+```
+
+Create `uv.toml` in that directory with:
+
+```toml
+python-preference = "only-system"
+python-downloads = "never"
+```
+
+Do not use `uv python pin --resolved`: `.python-version` should contain the
+literal stable path `/opt/homebrew/bin/python3`. Do not commit either local file
+or point this project at another application's internal Python/venv.
+
+```bash
+# Initial install (or resync after a user-approved Homebrew Python upgrade)
+uv sync --project "$PROJECT" --locked --extra secure-store
+
+# Canonical invocation, also from outside the project directory
+uv run --project "$PROJECT" --locked --extra secure-store dida-v2 --help
+
+# Development only; pytest need not remain installed for normal CLI use
+uv run --project "$PROJECT" --locked --extra secure-store --extra dev pytest
+```
+
+Keep `--extra secure-store` on every normal Mac invocation so a future venv
+rebuild also installs `keyring`. Add `--extra headless` only when you need the
+optional Selenium fallback. For the CLI examples below, replace the abbreviated
+`uv run dida-v2` prefix with
+`uv run --project "$PROJECT" --locked --extra secure-store dida-v2`.
+
+After Homebrew changes the interpreter behind its stable entry, the next native
+uv command reselects it and rebuilds `.venv` when required. If the pinned entry
+is missing or broken, the command fails rather than downloading another Python
+or falling back to Apple/uv/another application's Python. This is not an
+automatic `brew upgrade` service or a guarantee of compatibility with every
+future Python release; run the tests after upgrading, and retain the lockfile.
+
+Native path-pin integration tests use disposable projects, an isolated HOME,
+null keyring, and blocked runtime networking. They require uv plus two existing,
+different Python versions, supplied via `DIDA_TEST_UV_PYTHON` and
+`DIDA_TEST_UV_ALTERNATE_PYTHON`; otherwise only those integration tests skip.
+CI supplies both interpreters and runs them on Python 3.9 and the latest stable
+3.x, including venv creation/rebuilding, temporary entry retargeting, missing
+pins, project-external invocation, and secure-store retention. No test removes
+a real interpreter or accesses a real account.
+
 ## CLI examples
 
 ```bash
