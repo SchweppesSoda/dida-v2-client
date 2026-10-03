@@ -17,15 +17,20 @@ jobs:
       matrix:
         python: ["3.9", "3.x"]
     env:
-      HOME: ${{ runner.temp }}/offline-home
-      XDG_CONFIG_HOME: ${{ runner.temp }}/offline-home/.config
-      XDG_DATA_HOME: ${{ runner.temp }}/offline-home/.local/share
-      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
       UV_PYTHON_DOWNLOADS: never
       UV_PYTHON_PREFERENCE: only-system
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
     steps:
+      - name: Initialize isolated environment
+        run: |
+          isolated_home="$RUNNER_TEMP/offline-home"
+          mkdir -p "$isolated_home"
+          printf '%s\n' \
+            "HOME=$isolated_home" \
+            "XDG_CONFIG_HOME=$isolated_home/.config" \
+            "XDG_DATA_HOME=$isolated_home/.local/share" \
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
@@ -49,7 +54,6 @@ jobs:
           enable-cache: false
       - name: Locked install with secure-store
         run: |
-          mkdir -p "$HOME"
           uv sync --locked --extra dev --extra secure-store --python "${{ steps.python.outputs.python-path }}" --no-python-downloads
       - name: Offline suite including native uv selection
         env:
