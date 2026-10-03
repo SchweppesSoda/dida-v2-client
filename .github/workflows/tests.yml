@@ -1,0 +1,82 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.x"]
+    env:
+      HOME: ${{ runner.temp }}/offline-home
+      XDG_CONFIG_HOME: ${{ runner.temp }}/offline-home/.config
+      XDG_DATA_HOME: ${{ runner.temp }}/offline-home/.local/share
+      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+      UV_PYTHON_DOWNLOADS: never
+      UV_PYTHON_PREFERENCE: only-system
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      # Keep 3.9 available for the existing functional compatibility subprocess.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.9"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        id: alternate
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        id: python
+        with:
+          python-version: ${{ matrix.python }}
+          check-latest: true
+          allow-prereleases: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.12.19"
+          enable-cache: false
+      - name: Locked install with secure-store
+        run: |
+          mkdir -p "$HOME"
+          uv sync --locked --extra dev --extra secure-store --python "${{ steps.python.outputs.python-path }}" --no-python-downloads
+      - name: Offline suite including native uv selection
+        env:
+          DIDA_TEST_UV_PYTHON: ${{ steps.python.outputs.python-path }}
+          DIDA_TEST_UV_ALTERNATE_PYTHON: ${{ steps.alternate.outputs.python-path }}
+        run: |
+          uv run --locked --extra dev --extra secure-store --no-python-downloads python - <<'PY'
+          import socket
+          import pytest
+          attempts = []
+          def deny_network(*args, **kwargs):
+              attempts.append(args)
+              raise AssertionError("offline tests: networking forbidden")
+          socket.socket.connect = deny_network
+          socket.socket.connect_ex = deny_network
+          socket.create_connection = deny_network
+          socket.getaddrinfo = deny_network
+          result = pytest.main(["-q", "-p", "no:cacheprovider"])
+          assert not attempts, "unexpected runtime network access"
+          raise SystemExit(result)
+          PY
+      - name: Build sdist and wheel; installed-wheel smoke
+        run: |
+          uv build --python .venv/bin/python --no-python-downloads
+          uv venv "${{ runner.temp }}/wheel-venv" --python "${{ steps.python.outputs.python-path }}" --no-python-downloads
+          wheel=(dist/*.whl)
+          uv pip install --python "${{ runner.temp }}/wheel-venv/bin/python" "${wheel[0]}[secure-store]" --no-python-downloads
+          cd "${{ runner.temp }}"
+          wheel-venv/bin/python -c "import dida_v2_client, keyring, tzdata; from keyring.backends.null import Keyring; assert isinstance(keyring.get_keyring(), Keyring)"
+          wheel-venv/bin/dida-v2 --help

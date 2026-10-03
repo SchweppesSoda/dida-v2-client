@@ -339,22 +339,41 @@ def test_past_retry_after_http_date_retries_immediately(monkeypatch):
     assert sleeps == [0.0]
 
 
-def test_deeply_nested_json_is_wrapped_for_success_and_http_error(monkeypatch):
-    deep = ("[" * 2000 + "0" + "]" * 2000).encode()
-    client = client_with_retry(sleeps=[])
+@pytest.mark.parametrize("status", [200, 400])
+def test_json_recursion_error_is_wrapped_at_parser_boundary(monkeypatch, status):
+    # A fixed JSON depth does not reliably exceed every CPython decoder's limit.
+    body = b'{"secret":"TOKEN_A"}'
+    parsed = []
+    responses = []
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: FakeResponse(deep))
-    with pytest.raises(DidaV2Error) as success_exc:
+    def fail_json(raw):
+        parsed.append(raw)
+        raise RecursionError("decoder echoed TOKEN_A")
+
+    def fake_urlopen(req, timeout):
+        responses.append(req)
+        if status != 200:
+            raise http_error(req, status, body=body)
+        return FakeResponse(body)
+
+    monkeypatch.setattr("dida_v2_client.transport.json.loads", fail_json)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps = []
+    client = client_with_retry(sleeps=sleeps)
+    expected = DidaV2Error if status == 200 else DidaV2HTTPError
+    with pytest.raises(expected) as excinfo:
         client.request("GET", "/status")
-    assert not isinstance(success_exc.value, RecursionError)
-
-    def fail_http(req, timeout):
-        raise http_error(req, 400, body=deep)
-
-    monkeypatch.setattr("urllib.request.urlopen", fail_http)
-    with pytest.raises(DidaV2HTTPError) as http_exc:
-        client.request("GET", "/status")
-    assert http_exc.value.status == 400
+    assert not isinstance(excinfo.value, RecursionError)
+    if status == 200:
+        assert "Malformed JSON response" in str(excinfo.value)
+    else:
+        assert excinfo.value.status == 400
+        assert excinfo.value.error_code is None
+    formatted = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
+    assert "TOKEN_A" not in formatted
+    assert parsed == [body.decode()]
+    assert len(responses) == 1
+    assert sleeps == []
 
 
 def test_malformed_retry_after_header_falls_back_and_closes(monkeypatch):
